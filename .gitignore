@@ -1,0 +1,33 @@
+# Dependencies
+vendor/
+composer.lock
+
+# Uploads dan temporary files
+uploads/*
+!uploads/.gitkeep
+logs/*
+!logs/.gitkeep
+*.tmp
+*.temp
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# PHP
+.env
+.env.local
+*.log
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
