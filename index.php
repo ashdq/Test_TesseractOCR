@@ -24,6 +24,7 @@ $result = [
     'success' => false,
     'message' => '',
     'text' => '',
+    'fields' => [],
     'originalImage' => '',
     'preprocessedImage' => ''
 ];
@@ -122,9 +123,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image'])) {
                     $result['text'] = trim($processedText);
                     $result['message'] = 'Gambar berhasil dikonversi ke teks!';
                     
+                    // Extract KTP fields dari OCR text
+                    $result['fields'] = extractKtpFields($result['text']);
+                    
                     // Debug: Log final result
                     error_log("Final Result Text Length: " . strlen($result['text']));
                     error_log("Final Result Text: " . $result['text']);
+                    error_log("Extracted Fields: " . json_encode($result['fields']));
                     
                     // File asli dipertahankan agar preview "Gambar Original" tidak 404.
                     
@@ -377,6 +382,349 @@ function preprocessImageWithGD($inputPath, $outputPath) {
 }
 
 /**
+ * Extract KTP fields dari OCR text
+ * Parse text dan return array dengan field-field KTP terstruktur
+ * Dengan multiple fallback patterns untuk menangkap berbagai format OCR
+ */
+function extractKtpFields($text) {
+    $fields = [
+        'nik' => null,
+        'nama' => null,
+        'nomor_kk' => null,
+        'tempat_tgl_lahir' => null,  // Gabung: "JAKARTA / 25-01-1990"
+        'jenis_kelamin' => null,
+        'gol_darah' => null,
+        'alamat' => null,
+        'rt_rw' => null,              // Gabung RT dan RW: "001/002"
+        'kelurahan' => null,
+        'kecamatan' => null,
+        'kota_kabupaten' => null,
+        'provinsi' => null,
+        'agama' => null,
+        'status_perkawinan' => null,
+        'pekerjaan' => null,
+        'kewarganegaraan' => null,
+        'berlaku_hingga' => null,
+    ];
+    
+    // Split text menjadi lines untuk processing
+    $lines = explode("\n", $text);
+    $fullText = strtolower($text); // untuk searching multi-line patterns
+    
+    // Pattern untuk setiap field dengan multiple fallbacks
+    foreach ($lines as $lineIndex => $line) {
+        $line = trim($line);
+        if (empty($line)) continue;
+        
+        $lineLower = strtolower($line);
+        
+        // 1. Extract NIK (16 digit)
+        if (preg_match('/NIK\s*[:=]\s*(\d{16})/i', $line, $matches)) {
+            $fields['nik'] = $matches[1];
+        }
+        
+        // 2. Extract Nama (text setelah "Nama")
+        if (preg_match('/Nama\s*[:=]\s*([^|\n\r]+)/i', $line, $matches)) {
+            $nama = trim($matches[1]);
+            if (!empty($nama) && strlen($nama) > 2) {
+                $fields['nama'] = $nama;
+            }
+        }
+        
+        // 3. Extract Nomor Kartu Keluarga (16 digit)
+        if (preg_match('/(?:No(?:mor)?\.?\s*)?Kartu\s*Keluarga\s*[:=]\s*(\d{16})/i', $line, $matches)) {
+            $fields['nomor_kk'] = $matches[1];
+        } elseif (preg_match('/NK\s*[:=]\s*(\d{16})/i', $line, $matches)) {
+            $fields['nomor_kk'] = $matches[1];
+        }
+        
+        // 4-5. Extract Tempat & Tanggal Lahir (GABUNG dalam satu field)
+        // Handle multiple formats:
+        // - "Tempat/Tgl Lahir : JAKARTA / 25-01-1990"
+        // - "TempaTgl : Lahir:TANJUNGPINANG, 25 - 02 - 2001"
+        // - "Tempat Lahir : JAKARTA" (separate line)
+        // - "Tgl Lahir : 25-01-1990" (separate line)
+        
+        // Format 1: Standard "Tempat/Tgl Lahir" with "/" separator
+        if (preg_match('/Tempat\s*\/\s*Tgl\s*Lahir\s*[:=]\s*(.+)/i', $line, $matches)) {
+            $combined = trim($matches[1]);
+            if (!empty($combined) && strlen($combined) > 3) {
+                if (empty($fields['tempat_tgl_lahir'])) {
+                    $fields['tempat_tgl_lahir'] = $combined;
+                }
+            }
+        }
+        
+        // Format 2: "Tempat Tgl Lahir" with spaces
+        else if (preg_match('/Tempat\s+Tgl\s+Lahir\s*[:=]\s*(.+)/i', $line, $matches)) {
+            $combined = trim($matches[1]);
+            if (!empty($combined) && strlen($combined) > 3) {
+                if (empty($fields['tempat_tgl_lahir'])) {
+                    $fields['tempat_tgl_lahir'] = $combined;
+                }
+            }
+        }
+        
+        // Format 3: "TempaTgl : Lahir:" (combined word, then lahir prefix on same line)
+        else if (preg_match('/TempaTgl\s*[:=]\s*Lahir\s*[:=]\s*(.+)/i', $line, $matches)) {
+            $combined = trim($matches[1]);
+            if (!empty($combined) && strlen($combined) > 3) {
+                if (empty($fields['tempat_tgl_lahir'])) {
+                    // Clean up the combined string - remove extra spaces before dates
+                    $combined = preg_replace('/\s+(\d{1,2})\s+(-|\/)\s+(\d{1,2})\s+(-|\/)\s+(\d{4})/', ' $1-$3-$5', $combined);
+                    $fields['tempat_tgl_lahir'] = $combined;
+                }
+            }
+        }
+        
+        // Format 4: "TempaTgl" (typo/OCR error) - capture everything after it
+        else if (preg_match('/TempaTgl\s*[:=>\s]\s*(.+)/i', $line, $matches)) {
+            $combined = trim($matches[1]);
+            if (!empty($combined) && strlen($combined) > 3 && stripos($combined, 'lahir') !== false) {
+                if (empty($fields['tempat_tgl_lahir'])) {
+                    // Remove "Lahir" prefix and clean
+                    $combined = preg_replace('/^Lahir\s*[:=]\s*/i', '', $combined);
+                    $combined = preg_replace('/\s+(\d{1,2})\s+(-|\/)\s+(\d{1,2})\s+(-|\/)\s+(\d{4})/', ' $1-$3-$5', $combined);
+                    $fields['tempat_tgl_lahir'] = trim($combined);
+                }
+            }
+        }
+        
+        // Format 5: Fallback - "Tempat Lahir" dengan date di baris yang sama
+        else if (preg_match('/Tempat\s+Lahir\s*[:=]\s*([^,|\n\r]+?)(?:\s+(\d{1,2}[-\/]\d{1,2}[-\/]\d{4}))?/i', $line, $matches)) {
+            $tempat = trim($matches[1]);
+            $date = isset($matches[2]) ? trim($matches[2]) : '';
+            
+            if (!empty($tempat) && strlen($tempat) > 2) {
+                if (!empty($date)) {
+                    $combined = $tempat . ' / ' . $date;
+                    if (empty($fields['tempat_tgl_lahir'])) {
+                        $fields['tempat_tgl_lahir'] = $combined;
+                    }
+                }
+            }
+        }
+        
+        // Format 6: Fallback - detect date pattern after tempat/lahir keyword
+        if (empty($fields['tempat_tgl_lahir']) && preg_match('/([A-Z][A-Za-z\s,.-]+?)(?:\s+\/?\s+|,\s+)?(\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4})/i', $line, $matches)) {
+            if (stripos($lineLower, 'lahir') !== false) {
+                $tempat = trim($matches[1]);
+                $date = trim($matches[2]);
+                // Normalize date format
+                $date = preg_replace('/\s+/', '', $date);
+                $date = preg_replace('/[-\/]+/', '-', $date);
+                if (!empty($tempat) && strlen($tempat) > 2 && preg_match('/\d{1,2}-\d{1,2}-\d{4}/', $date)) {
+                    $fields['tempat_tgl_lahir'] = $tempat . ' / ' . $date;
+                }
+            }
+        }
+        
+        // 6. Extract Jenis Kelamin
+        if (preg_match('/Jenis\s*Kelamin\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $jk = trim($matches[1]);
+            if (preg_match('/(Laki|Perempuan)/i', $jk, $jk_matches)) {
+                $fields['jenis_kelamin'] = ucfirst(strtolower($jk_matches[1]));
+            }
+        }
+        
+        // 7. Extract Golongan Darah
+        if (preg_match('/(?:Gol|Golongan)\.?\s*Darah\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $gol = trim($matches[1]);
+            if (preg_match('/(A|B|AB|O)/i', $gol, $gol_matches)) {
+                $fields['gol_darah'] = $gol_matches[1];
+            }
+        }
+        
+        // 8. Extract Alamat
+        if (preg_match('/Alamat\s*[:=]\s*(.+?)(?=\s*(?:RT\s*\/\s*RW|RT\/RW|RT\s*[:=>]|RW\s*[:=>]|Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.|Kecamatan|Kec\.?|$))/i', $line, $matches)) {
+            $alamat = trim($matches[1]);
+            $alamat = preg_replace('/\s+["\']?\s*$/', '', $alamat);
+            $alamat = rtrim($alamat, ' ,;:.-');
+            if (!empty($alamat) && strlen($alamat) > 2) {
+                $fields['alamat'] = $alamat;
+            }
+        }
+        
+        // 9-10. Extract RT/RW (Gabung menjadi satu field dengan format "001/002")
+        // Handle multiple formats:
+        // - "RT/RW: 006/007"
+        // - "RT: 006 / RW: 007"
+        // - "006/007"
+        
+        // Format 1: Combined "RT/RW: 006/007"
+        if (preg_match('/RT\s*\/\s*RW\s*[:=>]\s*(\d+)\s*\/\s*(\d+)/i', $line, $matches)) {
+            $rt = str_pad($matches[1], 3, '0', STR_PAD_LEFT);
+            $rw = str_pad($matches[2], 3, '0', STR_PAD_LEFT);
+            if (empty($fields['rt_rw'])) {
+                $fields['rt_rw'] = $rt . '/' . $rw;
+            }
+        }
+        
+        // Format 2: Separate "RT:" and "RW:" on same line
+        else if (preg_match('/RT\s*[:=]?\s*(\d+).*?RW\s*[:=]?\s*(\d+)/i', $line, $matches)) {
+            $rt = str_pad($matches[1], 3, '0', STR_PAD_LEFT);
+            $rw = str_pad($matches[2], 3, '0', STR_PAD_LEFT);
+            if (empty($fields['rt_rw'])) {
+                $fields['rt_rw'] = $rt . '/' . $rw;
+            }
+        }
+        
+        // Format 3: Just numbers with slash like "006/007"
+        else if (preg_match('/\b(\d{1,3})\s*\/\s*(\d{1,3})\b/i', $line, $matches)) {
+            if (stripos($lineLower, 'rt') !== false || stripos($lineLower, 'rw') !== false) {
+                $rt = str_pad($matches[1], 3, '0', STR_PAD_LEFT);
+                $rw = str_pad($matches[2], 3, '0', STR_PAD_LEFT);
+                if (empty($fields['rt_rw'])) {
+                    $fields['rt_rw'] = $rt . '/' . $rw;
+                }
+            }
+        }
+        
+        // 11. Extract Kelurahan/Desa
+        // Handle formats: "Kelurahan", "Desa", "Kel/Desa", "Kel.", etc.
+        if (preg_match('/(?:Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.)\s*[:=]\s*(.+?)(?=\s*(?:Kecamatan|Kec\.?|Kota|Kabupaten|Provinsi|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
+            $kel = trim($matches[1]);
+            $kel = rtrim($kel, ' ,;:.-');
+            if (!empty($kel) && strlen($kel) > 2) {
+                if (empty($fields['kelurahan'])) {
+                    $fields['kelurahan'] = $kel;
+                }
+            }
+        }
+        
+        // 12. Extract Kecamatan
+        if (preg_match('/Kecamatan\s*[:=]\s*(.+?)(?=\s*(?:Kota|Kabupaten|Provinsi|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
+            $kec = trim($matches[1]);
+            $kec = rtrim($kec, ' ,;:.-');
+            if (!empty($kec) && strlen($kec) > 2) {
+                $fields['kecamatan'] = $kec;
+            }
+        }
+        
+        // 13. Extract Kota/Kabupaten
+        if (preg_match('/(?:Kota|Kabupaten)\s*(?:[:=]\s*|\s+)([^\n\r|]+)/i', $line, $matches)) {
+            $kota = trim($matches[1]);
+            $kota = preg_replace('/\s+/', ' ', $kota);
+            $kota = preg_replace('/^(KOTA|KABUPATEN)\s+\1\b/i', '$1', $kota);
+            if (!empty($kota) && strlen($kota) > 2) {
+                $fields['kota_kabupaten'] = $kota;
+            }
+        }
+        
+        // 14. Extract Provinsi
+        if (preg_match('/Provinsi\s*(?:[:=]\s*|\s+)([^\n\r|]+)/i', $line, $matches)) {
+            $prov = trim($matches[1]);
+            $prov = preg_replace('/\s+/', ' ', $prov);
+            if (!empty($prov) && strlen($prov) > 2) {
+                $fields['provinsi'] = $prov;
+            }
+        }
+        
+        // 15. Extract Agama
+        if (preg_match('/Agama\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $agama = trim($matches[1]);
+            if (!empty($agama) && strlen($agama) > 2) {
+                $fields['agama'] = $agama;
+            }
+        }
+        
+        // 16. Extract Status Perkawinan
+        if (preg_match('/(?:Status\s+)?Perkawinan\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $status = trim($matches[1]);
+            if (!empty($status) && strlen($status) > 2) {
+                // Ambil hanya status perkawinan yang valid, tanpa sisa teks OCR di belakangnya
+                if (preg_match('/\b(BELUM\s+KAWIN|KAWIN|CERAI\s+HIDUP|CERAI\s+MATI)\b/i', $status, $statusMatches)) {
+                    $fields['status_perkawinan'] = strtoupper(preg_replace('/\s+/', ' ', trim($statusMatches[1])));
+                } else {
+                    $fields['status_perkawinan'] = strtoupper(preg_replace('/\s+/', ' ', $status));
+                }
+            }
+        }
+        
+        // 17. Extract Pekerjaan - dengan multiple format fallbacks
+        // Handle formats: "Pekerjaan : ...", "Pekerjaan > ...", "Pekerjaan = ..."
+        if (preg_match('/Pekerjaan\s*[:=>\s]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $pekerjaan = trim($matches[1]);
+            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4}\s*$/', '', $pekerjaan);
+            if (!empty($pekerjaan) && strlen($pekerjaan) > 2) {
+                if (empty($fields['pekerjaan'])) {
+                    $fields['pekerjaan'] = $pekerjaan;
+                }
+            }
+        }
+        // Fallback for "Kerjaan" if "Pekerjaan" not found
+        else if (preg_match('/Kerjaan\s*[:=>\s]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $pekerjaan = trim($matches[1]);
+            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4}\s*$/', '', $pekerjaan);
+            if (!empty($pekerjaan) && strlen($pekerjaan) > 2) {
+                if (empty($fields['pekerjaan'])) {
+                    $fields['pekerjaan'] = $pekerjaan;
+                }
+            }
+        }
+        // Fallback: Look for lines with occupation-related keywords
+        else if (empty($fields['pekerjaan']) && preg_match('/(?:Pekerjaan|Kerjaan|Kerja)\s+[>:\-=]\s*(.+)/i', $line, $matches)) {
+            $pekerjaan = trim($matches[1]);
+            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4}\s*$/', '', $pekerjaan);
+            if (!empty($pekerjaan) && strlen($pekerjaan) > 2) {
+                $fields['pekerjaan'] = $pekerjaan;
+            }
+        }
+        
+        // 18. Extract Kewarganegaraan
+        if (preg_match('/Kewarganegaraan\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $kewarga = trim($matches[1]);
+            if (!empty($kewarga) && strlen($kewarga) > 2) {
+                $fields['kewarganegaraan'] = $kewarga;
+            }
+        }
+        
+        // 19. Extract Berlaku Hingga - dengan multiple format fallbacks
+        // Format 1: "Berlaku Hingga : 25-01-2035" (with date)
+        if (preg_match('/Berlaku\s+(?:Hingga|sampai|s\.d\.?)\s*[:=]\s*(\d{1,2}[-\/]\d{1,2}[-\/]\d{4})/i', $line, $matches)) {
+            if (empty($fields['berlaku_hingga'])) {
+                $fields['berlaku_hingga'] = trim($matches[1]);
+            }
+        }
+        // Format 2: "Berlaku Hingga : SEUMUR HIDUP" (text-based)
+        else if (preg_match('/Berlaku\s+(?:Hingga|sampai|Hing[g]?ga)\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+            $berlaku = trim($matches[1]);
+            if (!empty($berlaku) && strlen($berlaku) > 2) {
+                if (empty($fields['berlaku_hingga'])) {
+                    // Check if it's a date or text
+                    if (preg_match('/(\d{1,2}[-\/]\d{1,2}[-\/]\d{4})/', $berlaku, $dateMatches)) {
+                        $fields['berlaku_hingga'] = $dateMatches[1];
+                    } else {
+                        // It's a text value like "SEUMUR HIDUP"
+                        $fields['berlaku_hingga'] = $berlaku;
+                    }
+                }
+            }
+        }
+        // Format 3: Fallback - "Berlaku" keyword with value after
+        else if (empty($fields['berlaku_hingga']) && preg_match('/Berlaku\s+[>:\-=]\s*(.+)/i', $line, $matches)) {
+            $berlaku = trim($matches[1]);
+            if (!empty($berlaku) && strlen($berlaku) > 2) {
+                $fields['berlaku_hingga'] = $berlaku;
+            }
+        }
+    }
+    
+    // Cleanup dan normalisasi fields
+    foreach ($fields as $key => &$value) {
+        if ($value !== null) {
+            $value = trim($value);
+            // Remove extra spaces
+            $value = preg_replace('/\s+/', ' ', $value);
+            // Remove trailing punctuation
+            $value = rtrim($value, '.,;:!?');
+        }
+    }
+    
+    return $fields;
+}
+
+/**
  * Post-processing OCR text untuk meningkatkan akurasi
  * Mengatasi kesalahan umum dari Tesseract
  */
@@ -389,9 +737,6 @@ function postProcessOCRText($text) {
         // Colon (:) often read as equal (=) or other characters
         '/([a-zA-Z0-9])\s*=\s*([a-zA-Z0-9])/' => '$1 : $2',
         
-        // O (Oh) sering dibaca sebagai 0 (zero) untuk NIK/nomor yang context-nya jelas
-        // Tapi kita skip ini karena bisa salah untuk nomor yang sebenarnya
-        
         // Fix common Indonesian abbreviations misreads
         '/\btg[!]?\b/' => 'tgl',                    // tg! -> tgl
         '/\bTg[!]?\b/' => 'Tgl',                    // Tg! -> Tgl
@@ -399,6 +744,24 @@ function postProcessOCRText($text) {
         '/\bRT[!|]RW/' => 'RT/RW',                  // RT!RW / RT|RW -> RT/RW
         '/\bsel[!a]tan\b/' => 'selatan',            // selatan yang salah baca
         '/\butk\b/' => 'utk',                        // Cek utk abbreviation
+        
+        // Fix Kel/Desa variations
+        '/Kel\s*[.\/]\s*Desa/' => 'Kel/Desa',       // Kel. Desa / Kel / Desa -> Kel/Desa
+        '/Kelurahan\s*[.\/]\s*Desa/' => 'Kelurahan/Desa',
+        '/Kel\b/' => 'Kelurahan',                   // Kel -> Kelurahan context-based
+        
+        // Fix Pekerjaan variations
+        '/Peker[]j]aan/' => 'Pekerjaan',            // Peker-jaan -> Pekerjaan
+        '/Kerja(?!an)/' => 'Pekerjaan',             // Kerja alone might be Pekerjaan
+        
+        // Fix Berlaku Hingga variations  
+        '/Berlaku\s+Hing[g]ga/' => 'Berlaku Hingga',
+        '/Berlaku\s+s\.?d\.?/' => 'Berlaku Hingga', // s/d -> Berlaku Hingga
+        '/Sampai/' => 'Berlaku Hingga',              // Sampai -> Berlaku Hingga
+        
+        // Fix Tempat/Tgl Lahir separator
+        '/Tempat\s+[\/|]\s+Tgl/' => 'Tempat / Tgl', // Tempat|Tgl or variations
+        '/Tempat\s+Tgl\s+Lahir/' => 'Tempat/Tgl Lahir',
         
         // Fix common punctuation misreads
         '/([A-Z0-9])-\s*([A-Z0-9])/' => '$1 - $2',  // Add space around dash
@@ -761,12 +1124,101 @@ ob_end_clean();
             font-size: 0.95em;
         }
         
+        /* KTP Fields Styling */
+        .fields-section {
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            border-left: 4px solid #28a745;
+            margin: 20px 0;
+        }
+        
+        .fields-section h4 {
+            margin-bottom: 20px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .fields-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+        }
+        
+        .field-item {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+        }
+        
+        .field-label {
+            font-size: 0.85em;
+            color: #666;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+            display: block;
+        }
+        
+        .field-value {
+            color: #333;
+            font-size: 1em;
+            word-wrap: break-word;
+        }
+        
+        .field-value.empty {
+            color: #999;
+            font-style: italic;
+        }
+        
+        .tab-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .tab-button {
+            padding: 10px 20px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 1em;
+            color: #666;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+        
+        .tab-button.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+        
+        .tab-button:hover {
+            color: #667eea;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
         @media (max-width: 600px) {
             .header h1 {
                 font-size: 1.8em;
             }
             
             .images-preview {
+                grid-template-columns: 1fr;
+            }
+            
+            .fields-grid {
                 grid-template-columns: 1fr;
             }
         }
@@ -806,10 +1258,28 @@ ob_end_clean();
                 
                 <div class="images-preview" id="imagesPreview" style="display: none;"></div>
                 
-                <div class="text-result" id="textResult" style="display: none;">
-                    <h4>📄 Hasil Teks yang Dikonversi:</h4>
-                    <p id="extractedText"></p>
-                    <button class="copy-btn" onclick="copyToClipboard()">📋 Salin Teks</button>
+                <!-- Tab buttons untuk switch antara Teks Raw dan Fields -->
+                <div class="tab-buttons" id="tabButtons" style="display: none;">
+                    <button class="tab-button active" onclick="switchTab('raw-text')">📄 Teks Mentah</button>
+                    <button class="tab-button" onclick="switchTab('fields')">📋 Data Terstruktur</button>
+                </div>
+                
+                <!-- Raw Text Result -->
+                <div class="tab-content active" id="tab-raw-text">
+                    <div class="text-result" id="textResult" style="display: none;">
+                        <h4>📄 Hasil Teks yang Dikonversi:</h4>
+                        <p id="extractedText"></p>
+                        <button class="copy-btn" onclick="copyToClipboard()">📋 Salin Teks</button>
+                    </div>
+                </div>
+                
+                <!-- Structured Fields Result -->
+                <div class="tab-content" id="tab-fields">
+                    <div class="fields-section" id="fieldsSection" style="display: none;">
+                        <h4>🆔 Data Identitas KTP (Terstruktur)</h4>
+                        <div class="fields-grid" id="fieldsGrid"></div>
+                        <button class="copy-btn" onclick="copyFieldsToClipboard()" style="margin-top: 20px;">📋 Salin Semua Data</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -938,6 +1408,9 @@ ob_end_clean();
             const imagesPreview = document.getElementById('imagesPreview');
             const textResult = document.getElementById('textResult');
             const extractedText = document.getElementById('extractedText');
+            const fieldsSection = document.getElementById('fieldsSection');
+            const fieldsGrid = document.getElementById('fieldsGrid');
+            const tabButtons = document.getElementById('tabButtons');
             
             // Display images
             if (result.originalImage && result.preprocessedImage) {
@@ -955,38 +1428,130 @@ ob_end_clean();
                 `;
             }
             
-            // Display extracted text - perbaiki kondisi
+            // Display extracted text
             console.log('Result text field:', result.text);
-            console.log('Result text type:', typeof result.text);
-            console.log('Result text length:', result.text ? result.text.length : 'undefined');
+            console.log('Result fields:', result.fields);
             
-            // Tampilkan text result section jika ada teks
             if (result.text) {
                 const trimmedText = result.text.trim();
-                console.log('Trimmed text length:', trimmedText.length);
                 
                 if (trimmedText.length > 0) {
-                    console.log('Setting extracted text...');
                     if (extractedText) {
                         extractedText.textContent = trimmedText;
-                        extractedText.innerText = trimmedText;  // Fallback
-                        console.log('Text element content:', extractedText.textContent.substring(0, 50));
                     }
-                    
-                    // Show text result container
                     if (textResult) {
                         textResult.style.display = 'block';
-                        textResult.style.visibility = 'visible';
-                        console.log('Text result visibility set to block');
                     }
-                } else {
-                    console.warn('Text content is empty after trimming');
-                    showMessage('Text parsing selesai tapi hasilnya kosong', 'error');
                 }
-            } else {
-                console.error('Result.text is null or undefined');
-                showMessage('Text hasil OCR tidak tersedia', 'error');
             }
+            
+            // Display structured fields
+            if (result.fields && typeof result.fields === 'object') {
+                const fields = result.fields;
+                console.log('Processing fields:', fields);
+                
+                // Filter fields yang memiliki nilai
+                const fieldLabels = {
+                    'nik': '📌 Nomor NIK',
+                    'nama': '👤 Nama Lengkap',
+                    'nomor_kk': '👨‍👩‍👧‍👦 Nomor Kartu Keluarga',
+                    'tempat_tgl_lahir': '📍 Tempat / Tanggal Lahir',
+                    'jenis_kelamin': '⚧️ Jenis Kelamin',
+                    'gol_darah': '🩸 Golongan Darah',
+                    'alamat': '🏠 Alamat Lengkap',
+                    'rt_rw': '🏘️ RT/RW',
+                    'kelurahan': '🏞️ Kelurahan/Desa',
+                    'kecamatan': '🗺️ Kecamatan',
+                    'kota_kabupaten': '🏙️ Kota/Kabupaten',
+                    'provinsi': '🌎 Provinsi',
+                    'agama': '⛪ Agama',
+                    'status_perkawinan': '💍 Status Perkawinan',
+                    'pekerjaan': '👔 Pekerjaan',
+                    'kewarganegaraan': '🛂 Kewarganegaraan',
+                    'berlaku_hingga': '⏰ Berlaku Hingga'
+                };
+                
+                let fieldsHTML = '';
+                let hasFields = false;
+                
+                for (const [key, label] of Object.entries(fieldLabels)) {
+                    const value = fields[key];
+                    if (value) {
+                        hasFields = true;
+                        fieldsHTML += `
+                            <div class="field-item">
+                                <span class="field-label">${label}</span>
+                                <div class="field-value">${escapeHtml(value)}</div>
+                            </div>
+                        `;
+                    }
+                }
+                
+                if (hasFields) {
+                    fieldsGrid.innerHTML = fieldsHTML;
+                    fieldsSection.style.display = 'block';
+                    tabButtons.style.display = 'flex';
+                } else {
+                    console.log('No fields extracted');
+                    fieldsSection.style.display = 'none';
+                }
+            }
+        }
+        
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+        
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all buttons
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show selected tab
+            const selectedTab = document.getElementById('tab-' + tabName);
+            if (selectedTab) {
+                selectedTab.classList.add('active');
+            }
+            
+            // Add active class to clicked button
+            event.target.classList.add('active');
+        }
+        
+        function copyFieldsToClipboard() {
+            const fieldsGrid = document.getElementById('fieldsGrid');
+            const fieldItems = fieldsGrid.querySelectorAll('.field-item');
+            
+            let text = 'DATA IDENTITAS KTP\n';
+            text += '===================\n\n';
+            
+            fieldItems.forEach(item => {
+                const label = item.querySelector('.field-label').textContent.trim();
+                const value = item.querySelector('.field-value').textContent.trim();
+                text += label + ': ' + value + '\n';
+            });
+            
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = '✓ Tersalin!';
+                
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                }, 2000);
+            });
         }
         
         function copyToClipboard() {
