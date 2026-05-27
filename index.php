@@ -360,14 +360,14 @@ function createNikCrop($imagePath, $outputPath) {
 }
 
 /**
- * Create simple NIK crop using standard preprocessing (less aggressive).
- * This helps preserve digit clarity while still improving overall image quality.
+ * Create precise NIK crop using Imagick with digit-optimized preprocessing.
+ * Crop area: 10-25% height (skip header), left 65% width (skip photo).
+ * Upscale 3x and apply thresholding for clean binary output.
  */
 function createNikCropSimple($imagePath, $outputPath) {
     error_log("[createNikCropSimple] Starting for: " . $imagePath);
     
     try {
-        // Use GD as primary, fallback to Imagick if needed
         if (!extension_loaded('imagick') || !class_exists('Imagick')) {
             return createNikCropSimpleGD($imagePath, $outputPath);
         }
@@ -378,23 +378,35 @@ function createNikCropSimple($imagePath, $outputPath) {
         $imageHeight = $dimensions['height'];
         error_log("[createNikCropSimple] Image dimensions: " . $imageWidth . "x" . $imageHeight);
         
-        // Crop top 20% where NIK usually is (more conservative)
-        $cropWidth = $imageWidth;
-        $cropHeight = (int)max(150, min($imageHeight, $imageHeight * 0.20));
-        error_log("[createNikCropSimple] Crop height: " . $cropHeight);
+        // Precise crop: NIK is at ~10-25% height, left 65% width (exclude photo)
+        $yStart = (int)($imageHeight * 0.10);
+        $yEnd = (int)($imageHeight * 0.25);
+        $cropWidth = (int)($imageWidth * 0.65);
+        $cropHeight = $yEnd - $yStart;
+        error_log("[createNikCropSimple] Crop: y={$yStart}-{$yEnd}, w={$cropWidth}, h={$cropHeight}");
 
-        $image->cropImage($cropWidth, $cropHeight, 0, 0);
+        $image->cropImage($cropWidth, $cropHeight, 0, $yStart);
         $image->setImagePage(0, 0, 0, 0);
         
-        // Apply MODERATE enhancement (not aggressive)
+        // Upscale 3x for better digit OCR
+        $newWidth = $cropWidth * 3;
+        $newHeight = $cropHeight * 3;
+        $image->scaleImage($newWidth, $newHeight);
+        
+        // Convert to grayscale
         $image->setImageFormat('png');
         $image->transformImageColorspace(Imagick::COLORSPACE_GRAY);
-        $image->enhanceImage();
-        $image->enhanceImage();
+        
+        // Normalize and enhance
         $image->normalizeImage();
-        $image->contrastImage(1.5);  // Moderate, not aggressive
-        $image->brightnessContrastImage(10, 20);  // Moderate levels
-        $image->sharpenImage(0.8, 0.8);  // Light sharpening
+        $image->enhanceImage();
+        
+        // Apply threshold for clean binary (black text on white)
+        // Use Otsu-like approach: auto-threshold
+        $image->thresholdImage(0.5 * \Imagick::getQuantum());
+        
+        // Add white border for Tesseract padding
+        $image->borderImage('white', 20, 20);
         
         $image->writeImage($outputPath);
         $image->destroy();
@@ -408,7 +420,8 @@ function createNikCropSimple($imagePath, $outputPath) {
 }
 
 /**
- * Create simple NIK crop using GD Library with moderate preprocessing.
+ * Create precise NIK crop using GD Library (fallback).
+ * Same strategy: crop 10-25% height, left 65% width, upscale 3x, threshold.
  */
 function createNikCropSimpleGD($imagePath, $outputPath) {
     error_log("[createNikCropSimpleGD] Using GD Library");
@@ -446,30 +459,49 @@ function createNikCropSimpleGD($imagePath, $outputPath) {
 
         $width = imagesx($source);
         $height = imagesy($source);
-        $cropHeight = (int)max(150, min($height, $height * 0.20));
-        error_log("[createNikCropSimpleGD] GD crop height: " . $cropHeight);
+        
+        // Precise crop: 10-25% height, left 65% width
+        $yStart = (int)($height * 0.10);
+        $cropHeight = (int)($height * 0.15); // 25% - 10% = 15%
+        $cropWidth = (int)($width * 0.65);
+        error_log("[createNikCropSimpleGD] Crop: y={$yStart}, w={$cropWidth}, h={$cropHeight}");
         
         // Create crop
-        $crop = imagecreatetruecolor($width, $cropHeight);
-        imagecopy($crop, $source, 0, 0, 0, 0, $width, $cropHeight);
+        $crop = imagecreatetruecolor($cropWidth, $cropHeight);
+        imagecopy($crop, $source, 0, 0, 0, $yStart, $cropWidth, $cropHeight);
         imagedestroy($source);
         
-        // Apply MODERATE preprocessing (not aggressive)
-        @imagefilter($crop, IMG_FILTER_GRAYSCALE);
-        @imagefilter($crop, IMG_FILTER_SMOOTH, 1);
-        @imagefilter($crop, IMG_FILTER_BRIGHTNESS, 10);
-        @imagefilter($crop, IMG_FILTER_CONTRAST, 20);  // Moderate contrast
+        // Upscale 3x
+        $newWidth = $cropWidth * 3;
+        $newHeight = $cropHeight * 3;
+        $upscaled = imagecreatetruecolor($newWidth, $newHeight);
+        imagecopyresampled($upscaled, $crop, 0, 0, 0, 0, $newWidth, $newHeight, $cropWidth, $cropHeight);
+        imagedestroy($crop);
         
-        // Light sharpening
+        // Convert to grayscale
+        @imagefilter($upscaled, IMG_FILTER_GRAYSCALE);
+        
+        // Increase contrast strongly for near-binary output
+        @imagefilter($upscaled, IMG_FILTER_BRIGHTNESS, 20);
+        @imagefilter($upscaled, IMG_FILTER_CONTRAST, -80);
+        
+        // Sharpen
         $sharpenMatrix = [
             [-1, -1, -1],
             [-1, 12, -1],
             [-1, -1, -1]
         ];
-        @imageconvolution($crop, $sharpenMatrix, 8, 0);
+        @imageconvolution($upscaled, $sharpenMatrix, 4, 0);
         
-        imagepng($crop, $outputPath, 9);
-        imagedestroy($crop);
+        // Add white border (20px padding)
+        $bordered = imagecreatetruecolor($newWidth + 40, $newHeight + 40);
+        $white = imagecolorallocate($bordered, 255, 255, 255);
+        imagefill($bordered, 0, 0, $white);
+        imagecopy($bordered, $upscaled, 20, 20, 0, 0, $newWidth, $newHeight);
+        imagedestroy($upscaled);
+        
+        imagepng($bordered, $outputPath, 0);
+        imagedestroy($bordered);
         
         error_log("[createNikCropSimpleGD] Crop saved to: " . $outputPath);
         return true;
@@ -480,9 +512,9 @@ function createNikCropSimpleGD($imagePath, $outputPath) {
 }
 
 /**
- * OCR khusus untuk area NIK pada bagian atas dokumen.
- * Menggunakan crop dengan preprocessing moderat untuk hasil lebih stabil.
- * Mencoba berbagai PSM tanpa allowlist untuk fleksibilitas lebih tinggi.
+ * OCR khusus untuk area NIK - digit-optimized.
+ * PRIORITAS: digit-only allowlist dulu (paling akurat untuk angka),
+ * lalu fallback tanpa allowlist jika gagal.
  */
 function extractNikFromImage($imagePath) {
     error_log("[extractNikFromImage] Starting for: " . $imagePath);
@@ -500,59 +532,131 @@ function extractNikFromImage($imagePath) {
     $tempCropPath .= '.png';
 
     try {
-        // Create crop with moderate preprocessing
-        error_log("[extractNikFromImage] Creating crop with moderate preprocessing");
         if (!createNikCrop($imagePath, $tempCropPath)) {
             return null;
         }
 
-        error_log("[extractNikFromImage] Crop created, attempting OCR with multiple PSM strategies");
+        error_log("[extractNikFromImage] Crop created, attempting OCR-A model first");
         
-        // Try PSM values WITHOUT aggressive allowlist constraint
-        // PSM 6 = uniform block (good for standard KTP format), 8 = single word, 7 = single line, 11 = sparse
-        $psmValues = [6, 8, 7, 11];
+        $bestNik = null;
         
-        foreach ($psmValues as $psmValue) {
-            error_log("[extractNikFromImage] Trying PSM " . $psmValue . " without allowlist");
+        // STRATEGY 0 (HIGHEST PRIORITY): Use custom OCR-A trained model
+        // The OCR-A Extended font is specifically used for NIK numbers on KTP.
+        // This model is trained specifically for that font, giving the best accuracy.
+        $ocraModelPath = 'C:/Program Files/Tesseract-OCR/tessdata/ocra.traineddata';
+        if (file_exists($ocraModelPath)) {
+            error_log("[extractNikFromImage] OCR-A model found, using custom trained model");
+            $psmOcra = [7, 13, 8]; // single line, raw line, single word
             
-            $ocr = new TesseractOCR($tempCropPath);
-            $ocr->lang('ind+eng');
-            $ocr->psm($psmValue);
-            $ocr->oem(3);
-            // NOT using allowlist - allows Tesseract more flexibility
-
-            $nikText = trim((string)$ocr->run());
-            error_log("[extractNikFromImage] PSM " . $psmValue . " result: '" . $nikText . "'");
-            
-            if (!empty($nikText)) {
-                $nik = normalizeNikCandidate($nikText);
-                if ($nik !== null) {
-                    error_log("[extractNikFromImage] SUCCESS with PSM " . $psmValue . ": " . $nik);
-                    return $nik;
+            foreach ($psmOcra as $psm) {
+                try {
+                    $ocr = new TesseractOCR($tempCropPath);
+                    $ocr->lang('ocra');
+                    $ocr->psm($psm);
+                    $ocr->oem(1); // LSTM only - sesuai training model
+                    $ocr->allowlist('0123456789');
+                    
+                    $nikText = trim((string)$ocr->run());
+                    error_log("[extractNikFromImage] OCR-A PSM {$psm}: '{$nikText}'");
+                    
+                    if (empty($nikText)) continue;
+                    
+                    $digits = preg_replace('/\D/', '', $nikText);
+                    error_log("[extractNikFromImage] OCR-A Digits: '{$digits}' (len=" . strlen($digits) . ")");
+                    
+                    if (strlen($digits) == 16) {
+                        error_log("[extractNikFromImage] OCR-A SUCCESS PSM {$psm}: {$digits}");
+                        return $digits;
+                    }
+                    
+                    if (strlen($digits) > 16 && $bestNik === null) {
+                        $bestNik = substr($digits, 0, 16);
+                        error_log("[extractNikFromImage] OCR-A Partial PSM {$psm}, first 16: {$bestNik}");
+                    }
+                    
+                    if (strlen($digits) >= 15 && strlen($digits) <= 17 && $bestNik === null) {
+                        $bestNik = substr($digits, 0, 16);
+                        error_log("[extractNikFromImage] OCR-A Near-match PSM {$psm}: {$bestNik}");
+                    }
+                } catch (Exception $e) {
+                    error_log("[extractNikFromImage] OCR-A PSM {$psm} error: " . $e->getMessage());
                 }
             }
+            
+            if ($bestNik !== null) {
+                error_log("[extractNikFromImage] OCR-A best result: {$bestNik}");
+                return $bestNik;
+            }
+            
+            error_log("[extractNikFromImage] OCR-A model did not produce valid result, falling back...");
+        } else {
+            error_log("[extractNikFromImage] OCR-A model not found at {$ocraModelPath}, using default engine");
         }
         
-        // Fallback: Try with allowlist if all PSM attempts without allowlist failed
-        error_log("[extractNikFromImage] Fallback: Trying PSM 8 WITH allowlist");
-        $ocr2 = new TesseractOCR($tempCropPath);
-        $ocr2->lang('ind+eng');
-        $ocr2->psm(8);
-        $ocr2->oem(3);
-        $ocr2->allowlist('0123456789');
+        // STRATEGY 1 (SECONDARY): Digit-only allowlist with English model
+        // PSM 7 = single line, 8 = single word, 13 = raw line
+        $psmDigitOnly = [7, 8, 13];
+        $bestNik = null; // Reset for this strategy
         
-        $nikText2 = trim((string)$ocr2->run());
-        error_log("[extractNikFromImage] PSM 8 result with allowlist: '" . $nikText2 . "'");
+        foreach ($psmDigitOnly as $psm) {
+            try {
+                $ocr = new TesseractOCR($tempCropPath);
+                $ocr->lang('eng');
+                $ocr->psm($psm);
+                $ocr->oem(3);
+                $ocr->allowlist('0123456789');
+
+                $nikText = trim((string)$ocr->run());
+                error_log("[extractNikFromImage] Digit-only PSM {$psm}: '{$nikText}'");
+                
+                if (empty($nikText)) continue;
+                
+                $digits = preg_replace('/\D/', '', $nikText);
+                error_log("[extractNikFromImage] Digits: '{$digits}' (len=" . strlen($digits) . ")");
+                
+                if (strlen($digits) == 16) {
+                    error_log("[extractNikFromImage] SUCCESS PSM {$psm}: {$digits}");
+                    return $digits;
+                }
+                
+                if (strlen($digits) > 16 && $bestNik === null) {
+                    $bestNik = substr($digits, 0, 16);
+                    error_log("[extractNikFromImage] Partial PSM {$psm}, first 16: {$bestNik}");
+                }
+            } catch (Exception $e) {
+                error_log("[extractNikFromImage] PSM {$psm} digit-only error: " . $e->getMessage());
+            }
+        }
         
-        if (!empty($nikText2)) {
-            $nik = normalizeNikCandidate($nikText2);
-            if ($nik !== null) {
-                error_log("[extractNikFromImage] SUCCESS with PSM 8 (allowlist fallback): " . $nik);
-                return $nik;
+        if ($bestNik !== null) {
+            return $bestNik;
+        }
+        
+        // STRATEGY 2 (TERTIARY): No allowlist, use normalizeNikCandidate
+        $psmFallback = [6, 7, 8];
+        foreach ($psmFallback as $psm) {
+            try {
+                $ocr = new TesseractOCR($tempCropPath);
+                $ocr->lang('eng');
+                $ocr->psm($psm);
+                $ocr->oem(3);
+                
+                $nikText = trim((string)$ocr->run());
+                error_log("[extractNikFromImage] Fallback PSM {$psm}: '{$nikText}'");
+                
+                if (!empty($nikText)) {
+                    $nik = normalizeNikCandidate($nikText);
+                    if ($nik !== null) {
+                        error_log("[extractNikFromImage] Fallback SUCCESS PSM {$psm}: {$nik}");
+                        return $nik;
+                    }
+                }
+            } catch (Exception $e) {
+                error_log("[extractNikFromImage] Fallback PSM {$psm} error: " . $e->getMessage());
             }
         }
 
-        error_log("[extractNikFromImage] Failed to extract valid NIK from crop after all PSM attempts");
+        error_log("[extractNikFromImage] Failed after all strategies");
         return null;
     } catch (Exception $e) {
         error_log('[extractNikFromImage] Exception: ' . $e->getMessage());
@@ -1167,6 +1271,19 @@ function extractKtpFields($text, $imagePath = null) {
         }
     }
 
+    // PRIMARY NIK: Dedicated image crop OCR (most accurate method)
+    // Run this FIRST and let it override any text-based extraction
+    if ($imagePath !== null) {
+        error_log("[NIK] PRIMARY: Attempting dedicated image crop OCR");
+        $imageNik = extractNikFromImage($imagePath);
+        error_log("[NIK] PRIMARY result: " . ($imageNik ?? 'NULL'));
+        if (!empty($imageNik)) {
+            $previousNik = $fields['nik'];
+            $fields['nik'] = $imageNik;
+            error_log("[NIK] PRIMARY SUCCESS: {$imageNik} (replaced text-based: " . ($previousNik ?? 'null') . ")");
+        }
+    }
+
     // Fallback 1: kalau NIK masih kosong, cari dari keseluruhan teks OCR dengan label.
     if (empty($fields['nik'])) {
         error_log("[NIK] Fallback 1: Searching fulltext with NIK label");
@@ -1183,10 +1300,9 @@ function extractKtpFields($text, $imagePath = null) {
         }
     }
 
-    // Fallback 2: Cari 15-17 digit sequence tanpa label (mungkin OCR menghilangkan label atau hanya catch 15 dari 16)
+    // Fallback 2: Cari 15-17 digit sequence tanpa label
     if (empty($fields['nik'])) {
         error_log("[NIK] Fallback 2: Searching for 15-17 digit sequence without label");
-        // Look for digit-like patterns that could be NIK (15-17 chars to account for OCR variations)
         if (preg_match_all('/\b([0-9OolISZBdqg]{15,20})\b/i', $text, $digitMatches)) {
             foreach ($digitMatches[1] as $candidate) {
                 if (strlen($candidate) >= 15) {
@@ -1199,17 +1315,6 @@ function extractKtpFields($text, $imagePath = null) {
                     }
                 }
             }
-        }
-    }
-
-    // Fallback 3: Jika NIK masih belum stabil dari teks utama, coba OCR khusus area NIK.
-    if (empty($fields['nik']) && $imagePath !== null) {
-        error_log("[NIK] Fallback 3: Attempting image crop OCR");
-        $imageNik = extractNikFromImage($imagePath);
-        error_log("[NIK] Fallback 3 result: " . ($imageNik ?? 'NULL'));
-        if (!empty($imageNik)) {
-            $fields['nik'] = $imageNik;
-            error_log("[NIK] Fallback 3 SUCCESS: " . $imageNik);
         }
     }
 
@@ -1669,6 +1774,26 @@ ob_end_clean();
             font-size: 1em;
             word-wrap: break-word;
         }
+
+        .field-value[contenteditable="true"] {
+            min-height: 24px;
+            padding: 4px 6px;
+            border-radius: 4px;
+            outline: none;
+            transition: background-color 0.2s, box-shadow 0.2s;
+            white-space: pre-wrap;
+        }
+
+        .field-value[contenteditable="true"]:focus {
+            background: #eef3ff;
+            box-shadow: inset 0 0 0 1px #667eea;
+        }
+
+        .field-value[contenteditable="true"]:empty::before {
+            content: attr(data-placeholder);
+            color: #999;
+            font-style: italic;
+        }
         
         .field-value.empty {
             color: #999;
@@ -1976,22 +2101,26 @@ ob_end_clean();
                 let hasFields = false;
                 
                 for (const [key, label] of Object.entries(fieldLabels)) {
-                    const value = fields[key];
-                    if (value) {
-                        hasFields = true;
-                        fieldsHTML += `
-                            <div class="field-item">
-                                <span class="field-label">${label}</span>
-                                <div class="field-value">${escapeHtml(value)}</div>
-                            </div>
-                        `;
-                    }
+                    const rawValue = fields[key] ?? '';
+                    const value = String(rawValue).trim();
+                    hasFields = true;
+                    fieldsHTML += `
+                        <div class="field-item">
+                            <span class="field-label">${label}</span>
+                            <div class="field-value"
+                                 contenteditable="true"
+                                 spellcheck="false"
+                                 data-field-key="${key}"
+                                 data-placeholder="Klik untuk isi">${escapeHtml(value)}</div>
+                        </div>
+                    `;
                 }
                 
                 if (hasFields) {
                     fieldsGrid.innerHTML = fieldsHTML;
                     fieldsSection.style.display = 'block';
                     tabButtons.style.display = 'flex';
+                    bindEditableFieldEvents();
                 } else {
                     console.log('No fields extracted');
                     fieldsSection.style.display = 'none';
@@ -2008,6 +2137,42 @@ ob_end_clean();
                 "'": '&#039;'
             };
             return text.replace(/[&<>"']/g, m => map[m]);
+        }
+
+        function sanitizeEditableText(text) {
+            return String(text || '')
+                .replace(/\u00a0/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+
+        function bindEditableFieldEvents() {
+            document.querySelectorAll('.field-value[contenteditable="true"]').forEach((element) => {
+                element.addEventListener('paste', (event) => {
+                    event.preventDefault();
+                    const text = (event.clipboardData || window.clipboardData).getData('text/plain');
+                    document.execCommand('insertText', false, text);
+                });
+
+                element.addEventListener('input', () => {
+                    const sanitized = sanitizeEditableText(element.textContent);
+                    element.textContent = sanitized;
+                    moveCaretToEnd(element);
+                });
+
+                element.addEventListener('blur', () => {
+                    element.textContent = sanitizeEditableText(element.textContent);
+                });
+            });
+        }
+
+        function moveCaretToEnd(element) {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
         }
         
         function switchTab(tabName) {

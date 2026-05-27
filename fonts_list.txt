@@ -1,0 +1,12 @@
+﻿text2image.exe : Fontconfig error: Cannot load default config file: No such file: (null)
+At line:1 char:1
++ & "C:\Program Files\Tesseract-OCR\text2image.exe" --list_available_fo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Fontconfig erro...ch file: (null):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Fontconfig error: Cannot load default config file: No such file: (null)
+
+(process:732): Pango-CRITICAL **: 18:54:08.995: pango_font_face_describe: assertion 'PANGO_IS_FONT_FACE (face)' failed
+
+(process:732): Pango-CRITICAL **: 18:54:08.996: pango_font_description_to_string: assertion 'desc != NULL' failed
