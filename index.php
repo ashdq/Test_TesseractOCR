@@ -30,116 +30,91 @@ $result = [
 ];
 
 // Proses upload dan OCR
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image'])) {
-    $file = $_FILES['image'];
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image_ktp']) && isset($_FILES['image_kk'])) {
+    $fileKtp = $_FILES['image_ktp'];
+    $fileKk = $_FILES['image_kk'];
     
     // Validasi file
-    $error = validateFile($file, $maxFileSize, $allowedExtensions);
+    $errorKtp = validateFile($fileKtp, $maxFileSize, $allowedExtensions);
+    $errorKk = validateFile($fileKk, $maxFileSize, $allowedExtensions);
     
-    if ($error) {
-        $result['message'] = $error;
+    if ($errorKtp) {
+        $result['message'] = 'KTP: ' . $errorKtp;
+    } elseif ($errorKk) {
+        $result['message'] = 'KK: ' . $errorKk;
     } else {
         // Simpan file original
-        $filename = uniqid('ocr_') . '.' . getFileExtension($file['name']);
-        $filepath = $uploadsDir . '/' . $filename;
+        $filenameKtp = uniqid('ocr_ktp_') . '.' . getFileExtension($fileKtp['name']);
+        $filepathKtp = $uploadsDir . '/' . $filenameKtp;
         
-        if (move_uploaded_file($file['tmp_name'], $filepath)) {
-            $result['originalImage'] = 'uploads/' . $filename;
+        $filenameKk = uniqid('ocr_kk_') . '.' . getFileExtension($fileKk['name']);
+        $filepathKk = $uploadsDir . '/' . $filenameKk;
+        
+        if (move_uploaded_file($fileKtp['tmp_name'], $filepathKtp) && move_uploaded_file($fileKk['tmp_name'], $filepathKk)) {
+            $result['originalImage'] = 'uploads/' . $filenameKtp;
             
-            // Lakukan preprocessing dan simpan versi yang sudah dipreprocess
-            $preprocessedFilename = uniqid('preprocessed_') . '.png';
-            $preprocessedPath = $uploadsDir . '/' . $preprocessedFilename;
+            // PREPROCESSING KTP
+            $preprocessedFilenameKtp = uniqid('preprocessed_ktp_') . '.png';
+            $preprocessedPathKtp = $uploadsDir . '/' . $preprocessedFilenameKtp;
+            $preprocessSuccessKtp = preprocessImage($filepathKtp, $preprocessedPathKtp);
             
-            // Try preprocessing
-            $preprocessSuccess = preprocessImage($filepath, $preprocessedPath);
+            // PREPROCESSING KK
+            $preprocessedFilenameKk = uniqid('preprocessed_kk_') . '.png';
+            $preprocessedPathKk = $uploadsDir . '/' . $preprocessedFilenameKk;
+            $preprocessSuccessKk = preprocessImage($filepathKk, $preprocessedPathKk);
             
-            if (!$preprocessSuccess) {
-                $result['message'] = 'Error saat melakukan preprocessing gambar. Coba dengan gambar lain.';
-                error_log("Preprocessing failed for file: " . $filepath);
-                if (file_exists($filepath)) unlink($filepath);
-                if (file_exists($preprocessedPath)) unlink($preprocessedPath);
-            } elseif (!file_exists($preprocessedPath)) {
-                $result['message'] = 'File preprocessed tidak ditemukan setelah preprocessing.';
-                error_log("Preprocessed file not created at: " . $preprocessedPath);
-                if (file_exists($filepath)) unlink($filepath);
+            if (!$preprocessSuccessKtp || !$preprocessSuccessKk) {
+                $result['message'] = 'Error saat melakukan preprocessing gambar.';
+                if (file_exists($filepathKtp)) unlink($filepathKtp);
+                if (file_exists($filepathKk)) unlink($filepathKk);
+                if (file_exists($preprocessedPathKtp)) unlink($preprocessedPathKtp);
+                if (file_exists($preprocessedPathKk)) unlink($preprocessedPathKk);
             } else {
-                // File preprocessing berhasil
-                $result['preprocessedImage'] = 'uploads/' . $preprocessedFilename;
+                $result['preprocessedImage'] = 'uploads/' . $preprocessedFilenameKtp;
+                $result['originalImageKk'] = 'uploads/' . $filenameKk;
+                $result['preprocessedImageKk'] = 'uploads/' . $preprocessedFilenameKk;
                 
-                // Lakukan OCR pada gambar yang sudah dipreprocess
                 try {
-                    // Check if file exists sebelum OCR
-                    if (!file_exists($preprocessedPath)) {
-                        throw new Exception('Preprocessed image file tidak ditemukan untuk OCR');
+                    // --- 1. PROSES KTP ---
+                    $ocrKtp = new TesseractOCR($preprocessedPathKtp);
+                    $ocrKtp->lang('ind+eng')->psm(6)->oem(3);
+                    $extractedTextKtp = $ocrKtp->run();
+                    
+                    if (empty($extractedTextKtp) || trim($extractedTextKtp) === '') {
+                        throw new Exception('Tesseract KTP menghasilkan hasil kosong.');
                     }
                     
-                    $ocr = new TesseractOCR($preprocessedPath);
-                    // Set bahasa OCR (gunakan 'ind' untuk Indonesia, 'eng' untuk English)
-                    $ocr->lang('ind+eng');
+                    $processedTextKtp = postProcessOCRText(trim((string)$extractedTextKtp));
+                    if (!is_string($processedTextKtp) || trim($processedTextKtp) === '') $processedTextKtp = trim((string)$extractedTextKtp);
                     
-                    // Set PSM (Page Segmentation Mode) - 3 adalah auto segmentation yang bagus untuk dokumen
-                    // 6 lebih baik untuk uniform text blocks
-                    $ocr->psm(6);
+                    $result['text'] = trim($processedTextKtp); // Raw text preview KTP
+                    $result['fields'] = extractKtpFields($result['text'], $preprocessedPathKtp);
                     
-                    // Set OEM (OCR Engine Mode) - 3 adalah kombinasi legacy + LSTM (paling akurat)
-                    $ocr->oem(3);
+                    // --- 2. PROSES KK ---
+                    $ocrKk = new TesseractOCR($preprocessedPathKk);
+                    $ocrKk->lang('ind+eng')->psm(6)->oem(3);
+                    $extractedTextKk = $ocrKk->run();
                     
-                    // Configure Tesseract untuk akurasi lebih baik
-                    // Whitelist characters jika menggunakan karakter tertentu (optional)
-                    // $ocr->whitelist('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz');
-                    
-                    error_log("Starting OCR on: " . $preprocessedPath);
-                    $extractedText = $ocr->run();
-                    error_log("OCR completed. Result length: " . strlen($extractedText));
-                    
-                    // Check if result is empty
-                    if (empty($extractedText) || trim($extractedText) === '') {
-                        throw new Exception('Tesseract menghasilkan hasil kosong. Coba dengan gambar yang lebih jelas.');
+                    if (!empty($extractedTextKk)) {
+                        $nomorKk = extractNomorKK($extractedTextKk);
+                        if ($nomorKk) {
+                            $result['fields']['nomor_kk'] = $nomorKk;
+                        } else {
+                            error_log("Gagal menemukan Nomor KK dari teks OCR KK.");
+                        }
+                    } else {
+                        error_log("Tesseract KK menghasilkan hasil kosong.");
                     }
-                    
-                    // Debug: Log extracted text length
-                    error_log("OCR Raw Output Length: " . strlen($extractedText));
-                    error_log("OCR Raw Output (first 200 chars): " . substr($extractedText, 0, 200));
-                    
-                    // Lakukan post-processing untuk cleanup text.
-                    // Jika post-processing gagal, fallback ke raw OCR text.
-                    $rawText = trim((string)$extractedText);
-                    $processedText = postProcessOCRText($rawText);
-                    
-                    if (!is_string($processedText) || trim($processedText) === '') {
-                        error_log("Post-processing returned empty, fallback to raw OCR text");
-                        $processedText = $rawText;
-                    }
-                    
-                    if (trim($processedText) === '') {
-                        throw new Exception('Teks OCR kosong setelah pemrosesan. Coba gambar lain yang lebih jelas.');
-                    }
-                    
-                    // Debug: Log processed text
-                    error_log("Processed Text Length: " . strlen($processedText));
-                    error_log("Processed Text (first 200 chars): " . substr($processedText, 0, 200));
                     
                     $result['success'] = true;
-                    $result['text'] = trim($processedText);
-                    $result['message'] = 'Gambar berhasil dikonversi ke teks!';
-                    
-                    // Extract KTP fields dari OCR text
-                    $result['fields'] = extractKtpFields($result['text'], $preprocessedPath);
-                    
-                    // Debug: Log final result
-                    error_log("Final Result Text Length: " . strlen($result['text']));
-                    error_log("Final Result Text: " . $result['text']);
-                    error_log("Extracted Fields: " . json_encode($result['fields']));
-                    
-                    // File asli dipertahankan agar preview "Gambar Original" tidak 404.
+                    $result['message'] = 'Gambar KTP & KK berhasil dikonversi!';
                     
                 } catch (Exception $e) {
                     $result['message'] = 'Error saat melakukan OCR: ' . $e->getMessage();
-                    error_log("OCR Error: " . $e->getMessage());
-                    error_log("Stack trace: " . $e->getTraceAsString());
-                    // Hapus file yang sudah diupload jika terjadi error
-                    if (file_exists($filepath)) unlink($filepath);
-                    if (file_exists($preprocessedPath)) unlink($preprocessedPath);
+                    if (file_exists($filepathKtp)) unlink($filepathKtp);
+                    if (file_exists($filepathKk)) unlink($filepathKk);
+                    if (file_exists($preprocessedPathKtp)) unlink($preprocessedPathKtp);
+                    if (file_exists($preprocessedPathKk)) unlink($preprocessedPathKk);
                 }
             }
         } else {
@@ -192,15 +167,22 @@ function getFileExtension($filename) {
 function cleanupOCRNoise($text) {
     $text = trim($text);
     
-    // Remove common OCR noise characters
-    $text = preg_replace('/[\*~!^|#@$%&+=\-\(\)\[\]{}\\<>\/\?`"\']/i', '', $text);
+    // Potong teks di pipa | karena biasanya itu batas kolom foto
+    if (($pipePos = strpos($text, '|')) !== false) {
+        $text = substr($text, 0, $pipePos);
+    }
+    
+    // Remove common OCR noise characters (tidak termasuk '-' agar alamat/tanggal tetap utuh)
+    $text = preg_replace('/[\*~!^#@$%&+=\(\)\[\]{}\\<>\?`"\'\.]{2,}/i', '', $text);
+    $text = preg_replace('/[\*~!^#@$%&+=\[\]{}\\<>\?`"\']/', '', $text);
     
     // Remove multiple spaces
     $text = preg_replace('/\s+/', ' ', $text);
     
-    // Remove trailing noise: single letters/digits with space, or common OCR remnants
-    // e.g., "SIBOLGA, 05 - 01 - 2003 a" → "SIBOLGA, 05 - 01 - 2003"
-    $text = preg_replace('/\s+[a-z]\s*$/i', '', $text);
+    // Remove trailing noise: single letters/digits with space
+    // e.g., "SIMBOLON 11 sa" â†’ "SIMBOLON"
+    $text = preg_replace('/\s+\d+\s+[a-z]{1,3}\s*$/i', '', $text);
+    $text = preg_replace('/\s+[a-z]{1,2}\s*$/i', '', $text);
     
     // Remove patterns like "Kk ~~" or similar garbage at end
     $text = preg_replace('/\s+[a-z]{1,2}\s*~+\s*[a-z]?\s*$/i', '', $text);
@@ -209,12 +191,58 @@ function cleanupOCRNoise($text) {
 }
 
 /**
+ * Post-process a KTP field value: strip watermark words, trailing dates,
+ * trailing city names from the stamp area, and normalize spacing.
+ * @param string $value   The raw extracted value
+ * @param string $field   Field name hint for context-specific cleaning
+ * @return string
+ */
+function cleanupFieldValue($value, $field = '') {
+    $value = trim($value);
+    
+    // Potong di karakter pipe |
+    if (($pipePos = strpos($value, '|')) !== false) {
+        $value = substr($value, 0, $pipePos);
+    }
+    
+    // Hapus kata-kata watermark KTP yang sering ikut terbaca
+    $watermarkWords = [
+        'KARTU', 'TANDA', 'PENDUDUK', 'REPUBLIK', 'INDONESIA',
+        'BERLAKU', 'SEUMUR', 'HIDUP',
+    ];
+    // Hanya hapus watermark jika bukan field berlaku_hingga
+    if ($field !== 'berlaku_hingga') {
+        foreach ($watermarkWords as $ww) {
+            // Hapus jika muncul di AKHIR teks (bukan bagian dari nilai asli)
+            $value = preg_replace('/\s+' . preg_quote($ww, '/') . '\s*$/i', '', $value);
+        }
+    }
+    
+    // Strip trailing tanggal (dd-mm-yyyy atau dd - mm - yyyy)
+    $value = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4}\s*$/i', '', $value);
+    
+    // Strip trailing angka tunggal yang tidak relevan
+    $value = preg_replace('/\s+\d{1,2}\s*$/', '', $value);
+    
+    // Strip kata pendek acak di akhir (1-3 huruf saja) yang bukan singkatan umum
+    // Pengecualian: A, B, AB, O (golongan darah), WNI, WNA
+    if (!in_array($field, ['gol_darah', 'kewarganegaraan'])) {
+        $value = preg_replace('/\s+(?!WNI|WNA|A\b|AB\b|B\b|O\b)[A-Z]{1,2}\s*$/u', '', $value);
+    }
+    
+    // Normalize spaces
+    $value = preg_replace('/\s+/', ' ', $value);
+    
+    return trim($value);
+}
+
+/**
  * Helper function: Clean dan normalize Tempat/Tgl Lahir string
  * Handles:
  * - Removing corrupted prefix like "Te, mpat/Tgl: Lahir =:"
  * - Removing "Lahir:" prefix if present
  * - Extracting location name and date
- * - Fixing broken dates like "197 ) 1" → "1971"
+ * - Fixing broken dates like "197 ) 1" â†’ "1971"
  * - Removing non-date characters from date portion
  */
 function cleanupTempatTglLahir($text) {
@@ -240,7 +268,7 @@ function cleanupTempatTglLahir($text) {
         error_log("[cleanupTempatTglLahir] Location: '" . $location . "', Date raw: '" . $dateStr . "'");
         
         // Step 3: Clean up date - remove non-digit/date chars but preserve structure
-        // Handle cases like: "11 - 11 - 197 ) 1" → "11-11-1971"
+        // Handle cases like: "11 - 11 - 197 ) 1" â†’ "11-11-1971"
         $dateStr = trim($dateStr);
         
         // Remove OCR noise from date too
@@ -267,7 +295,7 @@ function cleanupTempatTglLahir($text) {
                 if (strlen($year) < 4) {
                     // Try to guess: if 3 digits like "197", might be "1970-1979"
                     if (strlen($year) == 3 && $year[0] == '1') {
-                        $year = $year . '0';  // 197 → 1970, then check if there's a 4th digit
+                        $year = $year . '0';  // 197 â†’ 1970, then check if there's a 4th digit
                     }
                 }
                 
@@ -866,6 +894,26 @@ function preprocessImageWithGD($inputPath, $outputPath) {
 }
 
 /**
+ * Extract Nomor KK (16 digit) dari hasil OCR gambar KK.
+ */
+function extractNomorKK($text) {
+    // Clean up typical OCR noise for KK Number specifically
+    // Sometimes 'No.' becomes 'No,' or 'No '
+    if (preg_match('/(?:No|Nomor)[\.\s,:=]*([0-9OolISZB]{16})/i', $text, $matches)) {
+        return normalizeNikCandidate($matches[1]);
+    }
+    
+    // Fallback: look for exactly 16 digits sequence
+    if (preg_match_all('/\b([0-9OolISZB]{16})\b/i', $text, $matches)) {
+        foreach ($matches[1] as $candidate) {
+            $normalized = normalizeNikCandidate($candidate);
+            if ($normalized) return $normalized;
+        }
+    }
+    return null;
+}
+
+/**
  * Extract KTP fields dari OCR text
  * Parse text dan return array dengan field-field KTP terstruktur
  * Dengan multiple fallback patterns untuk menangkap berbagai format OCR
@@ -907,22 +955,22 @@ function extractKtpFields($text, $imagePath = null) {
         if (stripos($lineLower, 'nik') !== false) {
             $nikCandidate = null;
 
-            // Pattern 1: Standard "NIK : 662689170882408" or "NIK = 662689170882408"
-            if (preg_match('/NIK\s*[:=]?\s*([0-9OolISZB8\.\-\s]{10,30})/i', $line, $matches)) {
+            // Pattern 1: Standard "NIK : 3423691411959489" â€” stop tepat setelah digit group 16-18 karakter
+            if (preg_match('/NIK\s*[:=]?\s*([0-9OolISZB8\.\-]{10,20})/i', $line, $matches)) {
                 $nikCandidate = $matches[1];
                 error_log("[NIK] Pattern 1 matched: " . $nikCandidate);
             }
             // Pattern 2: "NIK followed by digits" without colon
-            else if (preg_match('/NIK\s+([0-9OolISZB8\.\-\s]{10,30})/i', $line, $matches)) {
+            else if (preg_match('/NIK\s+([0-9OolISZB8\.\-]{10,20})/i', $line, $matches)) {
                 $nikCandidate = $matches[1];
                 error_log("[NIK] Pattern 2 matched: " . $nikCandidate);
             }
-            // Pattern 3: More lenient - capture everything after NIK
-            else if (preg_match('/NIK[:\s]+([^\n\r|]+)/i', $line, $matches)) {
-                $nikCandidate = $matches[1];
-                error_log("[NIK] Pattern 3 (lenient) matched: " . $nikCandidate);
+            // Pattern 3: Lenient - ambil sampai spasi atau karakter non-digit-ish pertama
+            else if (preg_match('/NIK[:\s]+([0-9OolISZB8\s\.\-]{10,25}?)(?:\s{2,}|[^0-9OolISZB8\s\.\-]|$)/i', $line, $matches)) {
+                $nikCandidate = trim($matches[1]);
+                error_log("[NIK] Pattern 3 matched: " . $nikCandidate);
             }
-            // Pattern 4: Look for 15-17 digit sequence in lines with NIK keyword (handles "KABUPATEN ... NIK 662689..." format)
+            // Pattern 4: Look for 15-17 digit sequence in lines with NIK keyword
             else if (preg_match('/([0-9OolISZB8dqg]{15,18})/', $line, $matches)) {
                 if (preg_match('/\d{14,}/', $matches[1])) {
                     $nikCandidate = $matches[1];
@@ -947,9 +995,16 @@ function extractKtpFields($text, $imagePath = null) {
         // 2. Extract Nama (text setelah "Nama")
         if (preg_match('/Nama\s*[:=]\s*([^|\n\r]+)/i', $line, $matches)) {
             $nama = trim($matches[1]);
-            $nama = cleanupOCRNoise($nama);  // Remove OCR noise
+            // Potong sebelum digit pertama (NIK/nomor tidak seharusnya di nama)
+            $nama = preg_replace('/\s*\d+.*$/s', '', $nama);
+            $nama = cleanupOCRNoise($nama);
+            $nama = cleanupFieldValue($nama, 'nama');
+            // Hanya ambil huruf, spasi, titik, koma, tanda hubung
+            $nama = preg_replace('/[^A-Za-z\s\.\,\-\']/u', '', $nama);
+            $nama = preg_replace('/\s+/', ' ', $nama);
+            $nama = trim($nama);
             if (!empty($nama) && strlen($nama) > 2) {
-                $fields['nama'] = $nama;
+                $fields['nama'] = strtoupper($nama);
             }
         }
         
@@ -1038,7 +1093,7 @@ function extractKtpFields($text, $imagePath = null) {
         }
         
         // Format 6: Fallback - detect date pattern after tempat/lahir keyword
-        // This also handles broken dates like "197 ) 1" → "1971"
+        // This also handles broken dates like "197 ) 1" â†’ "1971"
         if (empty($fields['tempat_tgl_lahir']) && preg_match('/([A-Z][A-Za-z\s,.-]+?)(?:\s+\/?\s+|,\s+)?(.*)$/i', $line, $matches)) {
             if (stripos($lineLower, 'lahir') !== false) {
                 $tempat = trim($matches[1]);
@@ -1057,8 +1112,11 @@ function extractKtpFields($text, $imagePath = null) {
         // 6. Extract Jenis Kelamin
         if (preg_match('/Jenis\s*Kelamin\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
             $jk = trim($matches[1]);
-            if (preg_match('/(Laki|Perempuan)/i', $jk, $jk_matches)) {
-                $fields['jenis_kelamin'] = ucfirst(strtolower($jk_matches[1]));
+            // Cari keyword valid, abaikan apapun setelahnya
+            if (preg_match('/\b(LAKI\s*-\s*LAKI|LAKI|PEREMPUAN)\b/i', $jk, $jk_matches)) {
+                $jkVal = strtoupper(preg_replace('/\s+/', ' ', trim($jk_matches[1])));
+                $jkVal = str_replace('LAKI LAKI', 'LAKI-LAKI', $jkVal);
+                $fields['jenis_kelamin'] = $jkVal;
             }
         }
         
@@ -1072,13 +1130,19 @@ function extractKtpFields($text, $imagePath = null) {
         }
         
         // 8. Extract Alamat
-        if (preg_match('/Alamat\s*[:=]\s*(.+?)(?=\s*(?:RT\s*\/\s*RW|RT\/RW|RT\s*[:=>]|RW\s*[:=>]|Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.|Kecamatan|Kec\.?|$))/i', $line, $matches)) {
+        // Potong tepat sebelum RT/RW, Kelurahan, atau pipa |
+        if (preg_match('/Alamat\s*[:=]\s*(.+?)(?=\s*(?:\||RT\s*\/\s*RW|RT\/RW|RT\s*[:=>]|RW\s*[:=>]|Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.|Kecamatan|Kec\.?|$))/i', $line, $matches)) {
             $alamat = trim($matches[1]);
+            // Potong di pipa |
+            if (($pipePos = strpos($alamat, '|')) !== false) {
+                $alamat = substr($alamat, 0, $pipePos);
+            }
             $alamat = preg_replace('/\s+["\']?\s*$/', '', $alamat);
             $alamat = rtrim($alamat, ' ,;:.-');
-            $alamat = cleanupOCRNoise($alamat);  // Remove OCR noise
+            $alamat = cleanupOCRNoise($alamat);
+            $alamat = cleanupFieldValue($alamat, 'alamat');
             if (!empty($alamat) && strlen($alamat) > 2) {
-                $fields['alamat'] = $alamat;
+                $fields['alamat'] = strtoupper($alamat);
             }
         }
         
@@ -1164,24 +1228,40 @@ function extractKtpFields($text, $imagePath = null) {
             }
         }
         
-        // 15. Extract Agama
+        // 15. Extract Agama â€” hanya kata pertama yang cocok dengan daftar agama valid
         if (preg_match('/Agama\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
             $agama = trim($matches[1]);
-            $agama = cleanupOCRNoise($agama);  // Remove OCR noise
-            if (!empty($agama) && strlen($agama) > 2) {
-                $fields['agama'] = $agama;
+            $agamaList = ['ISLAM', 'KRISTEN', 'KATOLIK', 'HINDU', 'BUDDHA', 'BUDHA', 'KONGHUCU', 'KONG HU CU'];
+            $agamaFound = null;
+            foreach ($agamaList as $ag) {
+                if (stripos($agama, $ag) !== false) {
+                    $agamaFound = $ag;
+                    break;
+                }
+            }
+            if ($agamaFound !== null) {
+                $fields['agama'] = strtoupper($agamaFound);
+            } else {
+                // Fallback: ambil satu kata pertama saja, uppercase
+                $agama = cleanupOCRNoise($agama);
+                $words = explode(' ', $agama);
+                if (!empty($words[0]) && strlen($words[0]) > 2) {
+                    $fields['agama'] = strtoupper($words[0]);
+                }
             }
         }
         
-        // 16. Extract Status Perkawinan
+        // 16. Extract Status Perkawinan â€” hanya nilai valid
         if (preg_match('/(?:Status\s+)?Perkawinan\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
             $status = trim($matches[1]);
             if (!empty($status) && strlen($status) > 2) {
-                // Ambil hanya status perkawinan yang valid, tanpa sisa teks OCR di belakangnya
+                // Ambil hanya status perkawinan yang valid, buang apapun setelahnya
                 if (preg_match('/\b(BELUM\s+KAWIN|KAWIN|CERAI\s+HIDUP|CERAI\s+MATI)\b/i', $status, $statusMatches)) {
                     $fields['status_perkawinan'] = strtoupper(preg_replace('/\s+/', ' ', trim($statusMatches[1])));
                 } else {
-                    $fields['status_perkawinan'] = strtoupper(preg_replace('/\s+/', ' ', $status));
+                    // Fallback: ambil kata-kata pertama sampai bertemu digit atau kata asing
+                    $status = cleanupFieldValue($status, 'status_perkawinan');
+                    $fields['status_perkawinan'] = strtoupper(preg_replace('/\s+/', ' ', trim($status)));
                 }
             }
         }
@@ -1190,8 +1270,11 @@ function extractKtpFields($text, $imagePath = null) {
         // Handle formats: "Pekerjaan : ...", "Pekerjaan > ...", "Pekerjaan = ..."
         if (preg_match('/Pekerjaan\s*[:=>\s]\s*([^\n\r|]+)/i', $line, $matches)) {
             $pekerjaan = trim($matches[1]);
-            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4}\s*$/', '', $pekerjaan);
-            $pekerjaan = cleanupOCRNoise($pekerjaan);  // Remove OCR noise
+            // Strip trailing tanggal (dd-mm-yyyy)
+            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4}\s*$/', '', $pekerjaan);
+            $pekerjaan = cleanupOCRNoise($pekerjaan);
+            $pekerjaan = cleanupFieldValue($pekerjaan, 'pekerjaan');
+            $pekerjaan = strtoupper(trim($pekerjaan));
             if (!empty($pekerjaan) && strlen($pekerjaan) > 2) {
                 if (empty($fields['pekerjaan'])) {
                     $fields['pekerjaan'] = $pekerjaan;
@@ -1201,8 +1284,10 @@ function extractKtpFields($text, $imagePath = null) {
         // Fallback for "Kerjaan" if "Pekerjaan" not found
         else if (preg_match('/Kerjaan\s*[:=>\s]\s*([^\n\r|]+)/i', $line, $matches)) {
             $pekerjaan = trim($matches[1]);
-            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4}\s*$/', '', $pekerjaan);
-            $pekerjaan = cleanupOCRNoise($pekerjaan);  // Remove OCR noise
+            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4}\s*$/', '', $pekerjaan);
+            $pekerjaan = cleanupOCRNoise($pekerjaan);
+            $pekerjaan = cleanupFieldValue($pekerjaan, 'pekerjaan');
+            $pekerjaan = strtoupper(trim($pekerjaan));
             if (!empty($pekerjaan) && strlen($pekerjaan) > 2) {
                 if (empty($fields['pekerjaan'])) {
                     $fields['pekerjaan'] = $pekerjaan;
@@ -1212,19 +1297,28 @@ function extractKtpFields($text, $imagePath = null) {
         // Fallback: Look for lines with occupation-related keywords
         else if (empty($fields['pekerjaan']) && preg_match('/(?:Pekerjaan|Kerjaan|Kerja)\s+[>:\-=]\s*(.+)/i', $line, $matches)) {
             $pekerjaan = trim($matches[1]);
-            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{4}\s*$/', '', $pekerjaan);
-            $pekerjaan = cleanupOCRNoise($pekerjaan);  // Remove OCR noise
+            $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4}\s*$/', '', $pekerjaan);
+            $pekerjaan = cleanupOCRNoise($pekerjaan);
+            $pekerjaan = cleanupFieldValue($pekerjaan, 'pekerjaan');
+            $pekerjaan = strtoupper(trim($pekerjaan));
             if (!empty($pekerjaan) && strlen($pekerjaan) > 2) {
                 $fields['pekerjaan'] = $pekerjaan;
             }
         }
         
-        // 18. Extract Kewarganegaraan
+        // 18. Extract Kewarganegaraan â€” hanya WNI atau WNA
         if (preg_match('/Kewarganegaraan\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
-            $kewarga = trim($matches[1]);
-            $kewarga = cleanupOCRNoise($kewarga);  // Remove OCR noise
-            if (!empty($kewarga) && strlen($kewarga) > 2) {
-                $fields['kewarganegaraan'] = $kewarga;
+            $kewarga = strtoupper(trim($matches[1]));
+            // Cari WNI atau WNA di teks
+            if (preg_match('/\b(WNI|WNA)\b/i', $kewarga, $kwMatches)) {
+                $fields['kewarganegaraan'] = strtoupper($kwMatches[1]);
+            } else {
+                // Fallback: bersihkan dan ambil kata pertama
+                $kewarga = cleanupOCRNoise($kewarga);
+                $words = explode(' ', $kewarga);
+                if (!empty($words[0]) && strlen($words[0]) >= 3) {
+                    $fields['kewarganegaraan'] = strtoupper($words[0]);
+                }
             }
         }
         
@@ -1853,24 +1947,59 @@ ob_end_clean();
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔤 OCR Converter</h1>
+            <h1>🔍 OCR Converter</h1>
             <p>Konversi Gambar menjadi Teks menggunakan Tesseract OCR</p>
         </div>
         
         <div class="content">
             <form id="ocrForm" enctype="multipart/form-data">
-                <div class="form-group">
-                    <div class="upload-area" id="uploadArea">
-                        <div class="upload-icon">📸</div>
-                        <div class="upload-text">
-                            <h3>Klik atau Drag & Drop Gambar</h3>
-                            <p>Supported: JPG, PNG, GIF, BMP, TIFF (Max 5MB)</p>
+                <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <div class="upload-area" id="uploadAreaKtp">
+                            <div class="upload-icon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#667eea" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display: inline-block; vertical-align: middle;">
+                                    <rect x="2" y="4" width="20" height="16" rx="2" ry="2"></rect>
+                                    <circle cx="8" cy="10" r="2"></circle>
+                                    <path d="M4 16c0-1.5 2-2.5 4-2.5s4 1 4 2.5"></path>
+                                    <line x1="14" y1="9" x2="20" y2="9"></line>
+                                    <line x1="14" y1="13" x2="18" y2="13"></line>
+                                    <line x1="14" y1="17" x2="19" y2="17"></line>
+                                </svg>
+                            </div>
+                            <div class="upload-text">
+                                <h3>Upload Gambar KTP</h3>
+                                <p>Supported: JPG, PNG, dll (Max 5MB)</p>
+                            </div>
                         </div>
+                        <input type="file" id="imageInputKtp" name="image_ktp" accept="image/*" required style="display: none;">
+                        <div class="filename" id="filenameKtp"></div>
                     </div>
-                    <input type="file" id="imageInput" name="image" accept="image/*" required>
-                    <div class="filename" id="filename"></div>
+                    <div>
+                        <div class="upload-area" id="uploadAreaKk">
+                            <div class="upload-icon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#764ba2" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display: inline-block; vertical-align: middle;">
+                                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                                    <line x1="7" y1="7" x2="17" y2="7" stroke-width="2"></line>
+                                    <circle cx="8" cy="13" r="1.5"></circle>
+                                    <path d="M6 17c0-.6.4-1 1-1h2c.6 0 1 .4 1 1v1H6v-1z"></path>
+                                    <circle cx="13" cy="13" r="1.5"></circle>
+                                    <path d="M11 17c0-.6.4-1 1-1h2c.6 0 1 .4 1 1v1h-4v-1z"></path>
+                                    <circle cx="17.5" cy="14" r="1"></circle>
+                                    <path d="M16 17c0-.4.3-.7.7-.7h1.6c.4 0 .7.3.7.7v1h-3v-1z"></path>
+                                </svg>
+                            </div>
+                            <div class="upload-text">
+                                <h3>Upload Gambar KK</h3>
+                                <p>Supported: JPG, PNG, dll (Max 5MB)</p>
+                            </div>
+                        </div>
+                        <input type="file" id="imageInputKk" name="image_kk" accept="image/*" required style="display: none;">
+                        <div class="filename" id="filenameKk"></div>
+                    </div>
+                </div>
+                <div class="form-group">
                     <button type="submit" class="btn btn-primary">Konversi ke Teks</button>
-                    <button type="reset" class="btn btn-secondary">Reset</button>
+                    <button type="reset" class="btn btn-secondary" style="width: 100%;">Reset</button>
                 </div>
             </form>
             
@@ -1912,51 +2041,64 @@ ob_end_clean();
     </div>
     
     <script>
-        const uploadArea = document.getElementById('uploadArea');
-        const imageInput = document.getElementById('imageInput');
+        const uploadAreaKtp = document.getElementById('uploadAreaKtp');
+        const imageInputKtp = document.getElementById('imageInputKtp');
+        const filenameKtp = document.getElementById('filenameKtp');
+
+        const uploadAreaKk = document.getElementById('uploadAreaKk');
+        const imageInputKk = document.getElementById('imageInputKk');
+        const filenameKk = document.getElementById('filenameKk');
+        
         const ocrForm = document.getElementById('ocrForm');
         const resultSection = document.getElementById('resultSection');
         const loading = document.getElementById('loading');
-        const filename = document.getElementById('filename');
         
-        // Drag & Drop
-        uploadArea.addEventListener('click', () => imageInput.click());
-        
-        uploadArea.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            uploadArea.classList.add('dragover');
-        });
-        
-        uploadArea.addEventListener('dragleave', () => {
-            uploadArea.classList.remove('dragover');
-        });
-        
-        uploadArea.addEventListener('drop', (e) => {
-            e.preventDefault();
-            uploadArea.classList.remove('dragover');
+        // Drag & Drop Functionality Helper
+        function setupDragAndDrop(area, input, filenameEl) {
+            area.addEventListener('click', () => input.click());
             
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                imageInput.files = files;
-                updateFilename();
-            }
-        });
-        
-        imageInput.addEventListener('change', updateFilename);
-        
-        function updateFilename() {
-            if (imageInput.files.length > 0) {
-                filename.textContent = '✓ ' + imageInput.files[0].name;
-                filename.style.color = '#28a745';
+            area.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                area.classList.add('dragover');
+            });
+            
+            area.addEventListener('dragleave', () => {
+                area.classList.remove('dragover');
+            });
+            
+            area.addEventListener('drop', (e) => {
+                e.preventDefault();
+                area.classList.remove('dragover');
+                
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    input.files = files;
+                    updateFilename(input, filenameEl);
+                }
+            });
+            
+            input.addEventListener('change', () => updateFilename(input, filenameEl));
+        }
+
+        function updateFilename(input, filenameEl) {
+            if (input.files.length > 0) {
+                filenameEl.textContent = 'âœ“ ' + input.files[0].name;
+                filenameEl.style.color = '#28a745';
+            } else {
+                filenameEl.textContent = '';
             }
         }
+
+        // Setup both areas
+        setupDragAndDrop(uploadAreaKtp, imageInputKtp, filenameKtp);
+        setupDragAndDrop(uploadAreaKk, imageInputKk, filenameKk);
         
         // Form Submit
         ocrForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             
-            if (!imageInput.files.length) {
-                showMessage('Pilih gambar terlebih dahulu!', 'error');
+            if (!imageInputKtp.files.length || !imageInputKk.files.length) {
+                showMessage('Pilih gambar KTP dan KK terlebih dahulu!', 'error');
                 return;
             }
             
@@ -2044,14 +2186,27 @@ ob_end_clean();
                 imagesPreview.style.display = 'grid';
                 imagesPreview.innerHTML = `
                     <div class="image-preview">
-                        <h4>Gambar Original</h4>
-                        <img src="${result.originalImage}" alt="Original Image">
+                        <h4>Gambar Original KTP</h4>
+                        <img src="${result.originalImage}" alt="Original Image KTP">
                     </div>
                     <div class="image-preview">
-                        <h4>Gambar Setelah Preprocessing</h4>
-                        <img src="${result.preprocessedImage}" alt="Preprocessed Image">
+                        <h4>Gambar Setelah Preprocessing KTP</h4>
+                        <img src="${result.preprocessedImage}" alt="Preprocessed Image KTP">
                     </div>
                 `;
+                
+                if (result.originalImageKk && result.preprocessedImageKk) {
+                    imagesPreview.innerHTML += `
+                        <div class="image-preview" style="margin-top: 20px;">
+                            <h4>Gambar Original KK</h4>
+                            <img src="${result.originalImageKk}" alt="Original Image KK">
+                        </div>
+                        <div class="image-preview" style="margin-top: 20px;">
+                            <h4>Gambar Setelah Preprocessing KK</h4>
+                            <img src="${result.preprocessedImageKk}" alt="Preprocessed Image KK">
+                        </div>
+                    `;
+                }
             }
             
             // Display extracted text
@@ -2086,7 +2241,7 @@ ob_end_clean();
                     'gol_darah': '🩸 Golongan Darah',
                     'alamat': '🏠 Alamat Lengkap',
                     'rt_rw': '🏘️ RT/RW',
-                    'kelurahan': '🏞️ Kelurahan/Desa',
+                    'kelurahan': '🏡 Kelurahan/Desa',
                     'kecamatan': '🗺️ Kecamatan',
                     'kota_kabupaten': '🏙️ Kota/Kabupaten',
                     'provinsi': '🌎 Provinsi',
@@ -2094,7 +2249,7 @@ ob_end_clean();
                     'status_perkawinan': '💍 Status Perkawinan',
                     'pekerjaan': '👔 Pekerjaan',
                     'kewarganegaraan': '🛂 Kewarganegaraan',
-                    'berlaku_hingga': '⏰ Berlaku Hingga'
+                    'berlaku_hingga': '⏳ Berlaku Hingga'
                 };
                 
                 let fieldsHTML = '';
@@ -2237,10 +2392,12 @@ ob_end_clean();
         
         // Reset form
         ocrForm.addEventListener('reset', () => {
-            filename.textContent = '';
+            filenameKtp.textContent = '';
+            filenameKk.textContent = '';
             resultSection.classList.remove('show');
             loading.classList.remove('show');
         });
     </script>
 </body>
 </html>
+
