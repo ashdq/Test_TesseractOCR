@@ -99,6 +99,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image_ktp']) && isse
                         $nomorKk = extractNomorKK($extractedTextKk);
                         if ($nomorKk) {
                             $result['fields']['nomor_kk'] = $nomorKk;
+                            // Tambahkan Nomor KK ke teks mentah bagian bawah
+                            $result['text'] .= "\nNomor KK: " . $nomorKk;
                         } else {
                             error_log("Gagal menemukan Nomor KK dari teks OCR KK.");
                         }
@@ -345,28 +347,14 @@ function normalizeNikCandidate($value) {
     
     error_log("[normalizeNikCandidate] After normalization: '" . $niks . "' (length: " . strlen($niks) . ")");
 
-    // Try to find exact 16-digit sequence
-    if (preg_match('/\d{16}/', $niks, $matches)) {
-        error_log("[normalizeNikCandidate] Found 16-digit sequence: " . $matches[0]);
-        return $matches[0];
+    // Accept 14+ digits directly without modification
+    // Kembalikan angka hasil OCR apa adanya, jangan ditambah/dikurang
+    if (strlen($niks) >= 14) {
+        error_log("[normalizeNikCandidate] Accepting " . strlen($niks) . " digits, returning exactly as read: " . $niks);
+        return $niks;
     }
 
-    // Accept 15-16 digits (OCR may miss 1 digit)
-    if (strlen($niks) >= 15 && strlen($niks) <= 17) {
-        $result = substr($niks, 0, 16);
-        error_log("[normalizeNikCandidate] Accepting " . strlen($niks) . " digits (threshold 15-17), returning: " . $result);
-        return $result;
-    }
-    
-    // If longer than 17, try to find 16-digit substring
-    if (strlen($niks) > 17) {
-        if (preg_match('/\d{16}/', $niks, $matches)) {
-            error_log("[normalizeNikCandidate] Found 16-digit in longer string: " . $matches[0]);
-            return $matches[0];
-        }
-    }
-
-    error_log("[normalizeNikCandidate] Failed: Only " . strlen($niks) . " digits found (need 15+)");
+    error_log("[normalizeNikCandidate] Failed: Only " . strlen($niks) . " digits found (need 14+)");
     return null;
 }
 
@@ -897,19 +885,36 @@ function preprocessImageWithGD($inputPath, $outputPath) {
  * Extract Nomor KK (16 digit) dari hasil OCR gambar KK.
  */
 function extractNomorKK($text) {
+    error_log("[KK] extractNomorKK called with text length: " . strlen($text));
+    error_log("[KK] Raw KK text (first 300): " . substr($text, 0, 300));
+    
     // Clean up typical OCR noise for KK Number specifically
-    // Sometimes 'No.' becomes 'No,' or 'No '
-    if (preg_match('/(?:No|Nomor)[\.\s,:=]*([0-9OolISZB]{16})/i', $text, $matches)) {
+    // Pattern 1: "No." / "Nomor" followed by digits (14-18 chars to be lenient)
+    if (preg_match('/(?:No|Nomor)[\.\s,:=]*([0-9OolISZB]{14,18})/i', $text, $matches)) {
+        error_log("[KK] Pattern 1 matched: " . $matches[1]);
         return normalizeNikCandidate($matches[1]);
     }
     
-    // Fallback: look for exactly 16 digits sequence
-    if (preg_match_all('/\b([0-9OolISZB]{16})\b/i', $text, $matches)) {
+    // Pattern 2: Look for "KK" keyword followed by digits
+    if (preg_match('/KK[\.\s,:=]*([0-9OolISZB]{14,18})/i', $text, $matches)) {
+        error_log("[KK] Pattern 2 (KK keyword) matched: " . $matches[1]);
+        return normalizeNikCandidate($matches[1]);
+    }
+    
+    // Fallback: look for 14-18 digit sequences anywhere in text
+    if (preg_match_all('/\b([0-9OolISZB]{14,18})\b/i', $text, $matches)) {
+        error_log("[KK] Fallback found " . count($matches[1]) . " candidates");
         foreach ($matches[1] as $candidate) {
+            error_log("[KK] Fallback candidate: " . $candidate);
             $normalized = normalizeNikCandidate($candidate);
-            if ($normalized) return $normalized;
+            if ($normalized) {
+                error_log("[KK] Fallback SUCCESS: " . $normalized);
+                return $normalized;
+            }
         }
     }
+    
+    error_log("[KK] No Nomor KK found in text");
     return null;
 }
 
@@ -923,7 +928,8 @@ function extractKtpFields($text, $imagePath = null) {
         'nik' => null,
         'nama' => null,
         'nomor_kk' => null,
-        'tempat_tgl_lahir' => null,  // Gabung: "JAKARTA / 25-01-1990"
+        'tempat_lahir' => null,      // String: "JAKARTA"
+        'tanggal_lahir' => null,     // Date: "25-01-1990"
         'jenis_kelamin' => null,
         'gol_darah' => null,
         'alamat' => null,
@@ -947,34 +953,45 @@ function extractKtpFields($text, $imagePath = null) {
     foreach ($lines as $lineIndex => $line) {
         $line = trim($line);
         if (empty($line)) continue;
-        
         $lineLower = strtolower($line);
         
-        // 1. Extract NIK (15-16 digit)
-        // OCR sering membaca angka sebagai huruf atau memisahkan digit dengan spasi/tanda baca.
+        // 1. Extract NIK (14-16 digit)
+        // OCR sering menggabungkan field lain (mis: "KOTA TANJUNGBALAI NIK : 75323711058188")
+        // dalam satu baris. Strategi: isolasi teks SETELAH keyword NIK terlebih dahulu.
         if (stripos($lineLower, 'nik') !== false) {
             $nikCandidate = null;
 
-            // Pattern 1: Standard "NIK : 3423691411959489" â€” stop tepat setelah digit group 16-18 karakter
-            if (preg_match('/NIK\s*[:=]?\s*([0-9OolISZB8\.\-]{10,20})/i', $line, $matches)) {
+            // Step A: Isolasi teks setelah keyword NIK untuk hindari prefix kota/field lain
+            $nikPart = '';
+            if (preg_match('/NIK\s*[:=]?\s*([0-9A-Za-z?|!\s\.\-]{8,25})/i', $line, $preMatches)) {
+                $nikPart = trim($preMatches[1]);
+                // Jika masih ada ':', ambil bagian setelah ':' terakhir
+                if (strpos($nikPart, ':') !== false) {
+                    $parts = explode(':', $nikPart);
+                    $nikPart = trim(end($parts));
+                }
+                error_log("[NIK] Isolated NIK part: '" . $nikPart . "'");
+            }
+
+            // Step B: Ambil sequence digit-OCR dari nikPart
+            if (!empty($nikPart) && preg_match('/([0-9OolISZBb8\.\-]{10,20})/', $nikPart, $matches)) {
                 $nikCandidate = $matches[1];
-                error_log("[NIK] Pattern 1 matched: " . $nikCandidate);
+                error_log("[NIK] Pattern 1 (isolated): '" . $nikCandidate . "'");
             }
-            // Pattern 2: "NIK followed by digits" without colon
-            else if (preg_match('/NIK\s+([0-9OolISZB8\.\-]{10,20})/i', $line, $matches)) {
-                $nikCandidate = $matches[1];
-                error_log("[NIK] Pattern 2 matched: " . $nikCandidate);
-            }
-            // Pattern 3: Lenient - ambil sampai spasi atau karakter non-digit-ish pertama
-            else if (preg_match('/NIK[:\s]+([0-9OolISZB8\s\.\-]{10,25}?)(?:\s{2,}|[^0-9OolISZB8\s\.\-]|$)/i', $line, $matches)) {
-                $nikCandidate = trim($matches[1]);
-                error_log("[NIK] Pattern 3 matched: " . $nikCandidate);
-            }
-            // Pattern 4: Look for 15-17 digit sequence in lines with NIK keyword
-            else if (preg_match('/([0-9OolISZB8dqg]{15,18})/', $line, $matches)) {
-                if (preg_match('/\d{14,}/', $matches[1])) {
+
+            // Step C: Fallback dari baris penuh jika Step B gagal
+            if (empty($nikCandidate)) {
+                if (preg_match('/NIK\s*[:=]?\s*([0-9OolISZB8\.\-]{10,20})/i', $line, $matches)) {
                     $nikCandidate = $matches[1];
-                    error_log("[NIK] Pattern 4 (digit sequence) matched: " . $nikCandidate);
+                    error_log("[NIK] Pattern 2 (full line): " . $nikCandidate);
+                } elseif (preg_match('/NIK[:\s]+([0-9OolISZB8\s\.\-]{10,25}?)(?:\s{2,}|[^0-9OolISZB8\s\.\-]|$)/i', $line, $matches)) {
+                    $nikCandidate = trim($matches[1]);
+                    error_log("[NIK] Pattern 3 (lenient): " . $nikCandidate);
+                } elseif (preg_match('/([0-9OolISZB8dqg]{14,18})/', $line, $matches)) {
+                    if (preg_match('/\d{12,}/', $matches[1])) {
+                        $nikCandidate = $matches[1];
+                        error_log("[NIK] Pattern 4 (digit seq): " . $nikCandidate);
+                    }
                 }
             }
 
@@ -1015,105 +1032,95 @@ function extractKtpFields($text, $imagePath = null) {
             $fields['nomor_kk'] = $matches[1];
         }
         
-        // 4-5. Extract Tempat & Tanggal Lahir (GABUNG dalam satu field)
+        // 4-5. Extract Tempat Lahir dan Tanggal Lahir (TERPISAH)
+        // Pertama ekstrak gabungan, lalu split ke tempat_lahir dan tanggal_lahir
         // Handle multiple formats:
         // - "Tempat/Tgl Lahir : JAKARTA / 25-01-1990"
         // - "TempaTgl : Lahir:TANJUNGPINANG, 25 - 02 - 2001"
         // - "Tempat Lahir : JAKARTA" (separate line)
         // - "Tgl Lahir : 25-01-1990" (separate line)
         
+        $combinedTTL = null; // temporary holder
+        
         // Format 1: Standard "Tempat/Tgl Lahir" with "/" separator
-        // Handle: "Tempat/Tgl Lahir : JAKARTA / 25-01-1990"
-        // Also handle: "Tempat/Tgl : Lahir:TANGERANG SELATAN, 11 - 11 - 197 ) 1"
         if (preg_match('/Tempat\s*\/\s*Tgl\s*(?:Lahir)?\s*[:=]\s*(.+)/i', $line, $matches)) {
             $combined = trim($matches[1]);
-            if (!empty($combined) && strlen($combined) > 3) {
-                if (empty($fields['tempat_tgl_lahir'])) {
-                    // Clean up the combined string
-                    $combined = cleanupTempatTglLahir($combined);
-                    if (!empty($combined)) {
-                        $fields['tempat_tgl_lahir'] = $combined;
-                    }
-                }
+            if (!empty($combined) && strlen($combined) > 3 && empty($fields['tempat_lahir'])) {
+                $combinedTTL = cleanupTempatTglLahir($combined);
             }
         }
-        
         // Format 2: "Tempat Tgl Lahir" with spaces
         else if (preg_match('/Tempat\s+Tgl\s+Lahir\s*[:=]\s*(.+)/i', $line, $matches)) {
             $combined = trim($matches[1]);
-            if (!empty($combined) && strlen($combined) > 3) {
-                if (empty($fields['tempat_tgl_lahir'])) {
-                    $combined = cleanupTempatTglLahir($combined);
-                    if (!empty($combined)) {
-                        $fields['tempat_tgl_lahir'] = $combined;
-                    }
-                }
+            if (!empty($combined) && strlen($combined) > 3 && empty($fields['tempat_lahir'])) {
+                $combinedTTL = cleanupTempatTglLahir($combined);
             }
         }
-        
-        // Format 3: "TempaTgl : Lahir:" (combined word, then lahir prefix on same line)
+        // Format 3: "TempaTgl : Lahir:" (combined word)
         else if (preg_match('/TempaTgl\s*[:=]\s*Lahir\s*[:=]\s*(.+)/i', $line, $matches)) {
             $combined = trim($matches[1]);
-            if (!empty($combined) && strlen($combined) > 3) {
-                if (empty($fields['tempat_tgl_lahir'])) {
-                    $combined = cleanupTempatTglLahir($combined);
-                    if (!empty($combined)) {
-                        $fields['tempat_tgl_lahir'] = $combined;
-                    }
-                }
+            if (!empty($combined) && strlen($combined) > 3 && empty($fields['tempat_lahir'])) {
+                $combinedTTL = cleanupTempatTglLahir($combined);
             }
         }
-        
-        // Format 4: "TempaTgl" (typo/OCR error) - capture everything after it
+        // Format 4: "TempaTgl" (typo/OCR error)
         else if (preg_match('/TempaTgl\s*[:=>\s]\s*(.+)/i', $line, $matches)) {
             $combined = trim($matches[1]);
-            if (!empty($combined) && strlen($combined) > 3 && stripos($combined, 'lahir') !== false) {
-                if (empty($fields['tempat_tgl_lahir'])) {
-                    $combined = cleanupTempatTglLahir($combined);
-                    if (!empty($combined)) {
-                        $fields['tempat_tgl_lahir'] = $combined;
-                    }
-                }
+            if (!empty($combined) && strlen($combined) > 3 && stripos($combined, 'lahir') !== false && empty($fields['tempat_lahir'])) {
+                $combinedTTL = cleanupTempatTglLahir($combined);
             }
         }
-        
         // Format 5: Fallback - "Tempat Lahir" dengan date di baris yang sama
         else if (preg_match('/Tempat\s+Lahir\s*[:=]\s*([^,|\n\r]+?)(?:\s+(\d{1,2}[-\/]\d{1,2}[-\/]\d{4}))?/i', $line, $matches)) {
             $tempat = trim($matches[1]);
             $date = isset($matches[2]) ? trim($matches[2]) : '';
-            
-            if (!empty($tempat) && strlen($tempat) > 2) {
-                if (!empty($date)) {
-                    $combined = $tempat . ' / ' . $date;
-                    if (empty($fields['tempat_tgl_lahir'])) {
-                        $fields['tempat_tgl_lahir'] = $combined;
-                    }
+            if (!empty($tempat) && strlen($tempat) > 2 && !empty($date) && empty($fields['tempat_lahir'])) {
+                $combinedTTL = $tempat . ' / ' . $date;
+            }
+        }
+        // Format 6: Fallback - detect date pattern after tempat/lahir keyword
+        if ($combinedTTL === null && empty($fields['tempat_lahir']) && preg_match('/([A-Z][A-Za-z\s,.-]+?)(?:\s+\/?\s+|,\s+)?(.*)$/i', $line, $matches)) {
+            if (stripos($lineLower, 'lahir') !== false) {
+                $tempat = trim($matches[1]);
+                $dateStr = isset($matches[2]) ? trim($matches[2]) : '';
+                if (!empty($dateStr)) {
+                    $combinedTTL = cleanupTempatTglLahir($tempat . ', ' . $dateStr);
                 }
             }
         }
         
-        // Format 6: Fallback - detect date pattern after tempat/lahir keyword
-        // This also handles broken dates like "197 ) 1" â†’ "1971"
-        if (empty($fields['tempat_tgl_lahir']) && preg_match('/([A-Z][A-Za-z\s,.-]+?)(?:\s+\/?\s+|,\s+)?(.*)$/i', $line, $matches)) {
-            if (stripos($lineLower, 'lahir') !== false) {
-                $tempat = trim($matches[1]);
-                $dateStr = isset($matches[2]) ? trim($matches[2]) : '';
-                
-                // Try to extract date even if malformed
-                if (!empty($dateStr)) {
-                    $combined = cleanupTempatTglLahir($tempat . ', ' . $dateStr);
-                    if (!empty($combined)) {
-                        $fields['tempat_tgl_lahir'] = $combined;
-                    }
-                }
+        // Split combined tempat/tgl lahir ke dua field terpisah
+        if (!empty($combinedTTL) && empty($fields['tempat_lahir'])) {
+            // Cari tanggal dengan format dd-mm-yyyy atau dd/mm/yyyy
+            if (preg_match('/^(.+?)\s*[\/,]\s*(\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4})/', $combinedTTL, $splitMatch)) {
+                $fields['tempat_lahir'] = trim($splitMatch[1]);
+                // Normalisasi tanggal: hapus spasi di sekitar separator dan pakai "-"
+                $tgl = preg_replace('/\s*[-\/]\s*/', '-', trim($splitMatch[2]));
+                $fields['tanggal_lahir'] = $tgl;
+            } else {
+                // Jika tidak ada tanggal terdeteksi, simpan semuanya sebagai tempat
+                $fields['tempat_lahir'] = $combinedTTL;
             }
         }
         
         // 6. Extract Jenis Kelamin
-        if (preg_match('/Jenis\s*Kelamin\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
+        // OCR sering membaca ":" sebagai "!" pada separator
+        if (preg_match('/Jenis\s*Kelamin\s*[:=!]\s*([^\n\r|]+)/i', $line, $matches)) {
             $jk = trim($matches[1]);
+            // Potong sebelum "Gol" agar tidak ikut terbaca
+            if (preg_match('/^(.*?)\s*Gol/i', $jk, $jkCut)) {
+                $jk = trim($jkCut[1]);
+            }
             // Cari keyword valid, abaikan apapun setelahnya
             if (preg_match('/\b(LAKI\s*-\s*LAKI|LAKI|PEREMPUAN)\b/i', $jk, $jk_matches)) {
+                $jkVal = strtoupper(preg_replace('/\s+/', ' ', trim($jk_matches[1])));
+                $jkVal = str_replace('LAKI LAKI', 'LAKI-LAKI', $jkVal);
+                $fields['jenis_kelamin'] = $jkVal;
+            }
+        }
+        // Fallback: cari keyword PEREMPUAN/LAKI-LAKI langsung di baris yang mengandung "Kelamin"
+        if (empty($fields['jenis_kelamin']) && stripos($line, 'kelamin') !== false) {
+            if (preg_match('/\b(LAKI\s*-\s*LAKI|PEREMPUAN)\b/i', $line, $jk_matches)) {
                 $jkVal = strtoupper(preg_replace('/\s+/', ' ', trim($jk_matches[1])));
                 $jkVal = str_replace('LAKI LAKI', 'LAKI-LAKI', $jkVal);
                 $fields['jenis_kelamin'] = $jkVal;
@@ -1205,9 +1212,13 @@ function extractKtpFields($text, $imagePath = null) {
         }
         
         // 13. Extract Kota/Kabupaten
-        // Batasi capture agar tidak ikut menelan NIK atau field lain di belakangnya.
-        // Use character class [a-zA-Z] to strictly avoid capturing digits (which would be NIK)
-        if (preg_match('/(?:Kota\/Kabupaten|Kota|Kabupaten)\s*(?:[:=]\s*|\s+)([a-zA-Z][a-zA-Z\s]*?)(?=\s*(?:NIK|\d{2,}|Nama|Tempat|Tgl|Jenis|Gol|Alamat|RT\/?RW|Kelurahan|Desa|Kecamatan|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
+        // Potong bagian NIK dari baris sebelum matching untuk menghindari field tercampur.
+        // Contoh: "KOTA TANJUNGBALAI NIK : 75323711058188" -> potong sebelum NIK.
+        $lineForKota = $line;
+        if (preg_match('/^(.*?)\s+NIK\b/i', $lineForKota, $kotaCut)) {
+            $lineForKota = $kotaCut[1]; // Ambil hanya bagian sebelum NIK
+        }
+        if (preg_match('/(?:Kota\/Kabupaten|Kota|Kabupaten)\s*(?:[:=]\s*|\s+)([a-zA-Z][a-zA-Z\s]*?)(?=\s*(?:NIK|\d{4,}|Nama|Tempat|Tgl|Jenis|Gol|Alamat|RT\/?RW|Kelurahan|Desa|Kecamatan|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $lineForKota, $matches)) {
             $kota = trim($matches[1]);
             $kota = preg_replace('/\s+/', ' ', $kota);
             $kota = preg_replace('/^(KOTA|KABUPATEN)\s+\1\b/i', '$1', $kota);
@@ -1228,7 +1239,7 @@ function extractKtpFields($text, $imagePath = null) {
             }
         }
         
-        // 15. Extract Agama â€” hanya kata pertama yang cocok dengan daftar agama valid
+        // 15. Extract Agama — hanya kata pertama yang cocok dengan daftar agama valid
         if (preg_match('/Agama\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
             $agama = trim($matches[1]);
             $agamaList = ['ISLAM', 'KRISTEN', 'KATOLIK', 'HINDU', 'BUDDHA', 'BUDHA', 'KONGHUCU', 'KONG HU CU'];
@@ -1251,7 +1262,7 @@ function extractKtpFields($text, $imagePath = null) {
             }
         }
         
-        // 16. Extract Status Perkawinan â€” hanya nilai valid
+        // 16. Extract Status Perkawinan — hanya nilai valid
         if (preg_match('/(?:Status\s+)?Perkawinan\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
             $status = trim($matches[1]);
             if (!empty($status) && strlen($status) > 2) {
@@ -1267,11 +1278,16 @@ function extractKtpFields($text, $imagePath = null) {
         }
         
         // 17. Extract Pekerjaan - dengan multiple format fallbacks
-        // Handle formats: "Pekerjaan : ...", "Pekerjaan > ...", "Pekerjaan = ..."
-        if (preg_match('/Pekerjaan\s*[:=>\s]\s*([^\n\r|]+)/i', $line, $matches)) {
+        // Handle formats: "Pekerjaan : ...", "Pekerjaan > ...", "Pekerjaan = ...", "Pekerjaan ! ..."
+        // OCR sering membaca ":" sebagai "!" pada separator Pekerjaan
+        if (preg_match('/Pekerjaan\s*[:=>!\s]\s*([^\n\r|]+)/i', $line, $matches)) {
             $pekerjaan = trim($matches[1]);
-            // Strip trailing tanggal (dd-mm-yyyy)
+            // Hapus karakter noise yang muncul jika OCR salah baca separator
+            $pekerjaan = ltrim($pekerjaan, '!>= ');
+            // Strip trailing tanggal (dd-mm-yyyy) yang ikut terbaca dari stempel/cap
             $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4}\s*$/', '', $pekerjaan);
+            // Strip trailing kota/kata >= 5 huruf di akhir yang tidak relevan
+            $pekerjaan = preg_replace('/\s+[A-Z]{5,}\s*$/', '', $pekerjaan);
             $pekerjaan = cleanupOCRNoise($pekerjaan);
             $pekerjaan = cleanupFieldValue($pekerjaan, 'pekerjaan');
             $pekerjaan = strtoupper(trim($pekerjaan));
@@ -1365,16 +1381,15 @@ function extractKtpFields($text, $imagePath = null) {
         }
     }
 
-    // PRIMARY NIK: Dedicated image crop OCR (most accurate method)
-    // Run this FIRST and let it override any text-based extraction
-    if ($imagePath !== null) {
-        error_log("[NIK] PRIMARY: Attempting dedicated image crop OCR");
+    // FALLBACK: Dedicated image crop OCR
+    // Jika NIK gagal diekstrak dari teks mentah, coba gunakan metode crop khusus NIK
+    if (empty($fields['nik']) && $imagePath !== null) {
+        error_log("[NIK] Fallback Crop: Attempting dedicated image crop OCR");
         $imageNik = extractNikFromImage($imagePath);
-        error_log("[NIK] PRIMARY result: " . ($imageNik ?? 'NULL'));
+        error_log("[NIK] Fallback Crop result: " . ($imageNik ?? 'NULL'));
         if (!empty($imageNik)) {
-            $previousNik = $fields['nik'];
             $fields['nik'] = $imageNik;
-            error_log("[NIK] PRIMARY SUCCESS: {$imageNik} (replaced text-based: " . ($previousNik ?? 'null') . ")");
+            error_log("[NIK] Fallback Crop SUCCESS: {$imageNik}");
         }
     }
 
@@ -2236,7 +2251,8 @@ ob_end_clean();
                     'nik': '📌 Nomor NIK',
                     'nama': '👤 Nama Lengkap',
                     'nomor_kk': '👨‍👩‍👧‍👦 Nomor Kartu Keluarga',
-                    'tempat_tgl_lahir': '📍 Tempat / Tanggal Lahir',
+                    'tempat_lahir': '📍 Tempat Lahir',
+                    'tanggal_lahir': '📅 Tanggal Lahir',
                     'jenis_kelamin': '⚧️ Jenis Kelamin',
                     'gol_darah': '🩸 Golongan Darah',
                     'alamat': '🏠 Alamat Lengkap',
