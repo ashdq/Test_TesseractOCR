@@ -1,0 +1,170 @@
+[
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_10_png.rf.34e92c88ffa26973fd3838ab0ea24d4e.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122311150006"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_11_png.rf.a208eef553620c5454df1c757a86fc54.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121502190003"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_12_png.rf.799efe08e0b2c93194f723f8741b9dfd.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121412180004"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_13_png.rf.50b03c0909ab3ddb9f5f483edd4e9a7f.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807120809080001"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_14_png.rf.965b6adab4363a2fdeee517045ab14b0.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121412180008"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_15_png.rf.57017d3bba5749090b22ca31f9a734d8.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121304180006"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_16_png.rf.d7ef0964d34da6c507a294c916b067af.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807120802120002"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_17_png.rf.8cb6bce1f4d0fc9619239c4809f0cfbd.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122408200008"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_18_png.rf.c939b49dc26bc22edf35692da02770c6.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122609140007"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_19_png.rf.3090b92c218431c4281c3e91cab0a3ef.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807123112100022"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_1_png.rf.878dccaccd74ca38aaed088b3e1c7dd1.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122205230004"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_20_png.rf.f6d8fb5506cb2da877ca915fd95df3a6.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122304083210"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_21_png.rf.2ebe24bd8291564ef8d9c213675c4dd6.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122304083212"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_22_png.rf.4775134667aeba171fadbfb354cb57f4.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807123112100026"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_23_png.rf.4abfb650aa424623888a827376581b0e.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122608080054"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_24_png.rf.3f520f5c2d8d1f001d701f35c408e7a9.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121810160007"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_25_png.rf.a09006be25fc95c6903125cff72dd5d7.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807123112100016"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_26_png.rf.252683b713674386a313daedb316078a.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807120309130008"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_27_png.rf.e4032e1e812f4d0ce700ce22abd2cfc6.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807123112100020"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_28_png.rf.fb6affcb0303c841b76596f17795d0da.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121711170006"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_2_png.rf.e742839853098794d8916a0e55aa9cfd.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807121710170008"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_3_png.rf.bea140989ade41807a9d9240dd94d508.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122608080006"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_4_png.rf.ebd272ebd62b61dbf4e224faf25cd71a.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122304082667"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_5_png.rf.cfc4d3d472f5c14cab45455765266441.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122608080009"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_6_png.rf.53c9f10b51607df78301b2aad8f19e4b.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122908080041"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_7_png.rf.c1e26bf6d467341a733e594b720cbc15.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807120601210004"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_8_png.rf.6c81fe2518d76a2b259ea523d25130eb.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122202120002"
+        }
+    },
+    {
+        "image_path": "uploads/sample kk/DUSUN9RT1_pdf_page_9_png.rf.01a700e6780d2866f20660b8285389c7.jpg",
+        "ground_truth": {
+            "nomor_kk": "1807122708080004"
+        }
+    }
+]

@@ -45,22 +45,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image_ktp']) && isse
     } else {
         // Simpan file original
         $filenameKtp = uniqid('ocr_ktp_') . '.' . getFileExtension($fileKtp['name']);
-        $filepathKtp = $uploadsDir . '/' . $filenameKtp;
+        
+        // Buat folder khusus KTP jika belum ada
+        $uploadsKtpDir = __DIR__ . '/uploads/upload ktp';
+        if (!is_dir($uploadsKtpDir)) {
+            mkdir($uploadsKtpDir, 0755, true);
+        }
+        $filepathKtp = $uploadsKtpDir . '/' . $filenameKtp;
+        
+        // Buat folder khusus KK jika belum ada
+        $uploadsKkDir = __DIR__ . '/uploads/upload kk';
+        if (!is_dir($uploadsKkDir)) {
+            mkdir($uploadsKkDir, 0755, true);
+        }
         
         $filenameKk = uniqid('ocr_kk_') . '.' . getFileExtension($fileKk['name']);
-        $filepathKk = $uploadsDir . '/' . $filenameKk;
+        $filepathKk = $uploadsKkDir . '/' . $filenameKk;
         
         if (move_uploaded_file($fileKtp['tmp_name'], $filepathKtp) && move_uploaded_file($fileKk['tmp_name'], $filepathKk)) {
-            $result['originalImage'] = 'uploads/' . $filenameKtp;
+            $result['originalImage'] = 'uploads/upload ktp/' . $filenameKtp;
             
             // PREPROCESSING KTP
             $preprocessedFilenameKtp = uniqid('preprocessed_ktp_') . '.png';
-            $preprocessedPathKtp = $uploadsDir . '/' . $preprocessedFilenameKtp;
+            $preprocessedPathKtp = $uploadsKtpDir . '/' . $preprocessedFilenameKtp;
             $preprocessSuccessKtp = preprocessImage($filepathKtp, $preprocessedPathKtp);
             
             // PREPROCESSING KK
             $preprocessedFilenameKk = uniqid('preprocessed_kk_') . '.png';
-            $preprocessedPathKk = $uploadsDir . '/' . $preprocessedFilenameKk;
+            $preprocessedPathKk = $uploadsKkDir . '/' . $preprocessedFilenameKk;
             $preprocessSuccessKk = preprocessImage($filepathKk, $preprocessedPathKk);
             
             if (!$preprocessSuccessKtp || !$preprocessSuccessKk) {
@@ -70,9 +82,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image_ktp']) && isse
                 if (file_exists($preprocessedPathKtp)) unlink($preprocessedPathKtp);
                 if (file_exists($preprocessedPathKk)) unlink($preprocessedPathKk);
             } else {
-                $result['preprocessedImage'] = 'uploads/' . $preprocessedFilenameKtp;
-                $result['originalImageKk'] = 'uploads/' . $filenameKk;
-                $result['preprocessedImageKk'] = 'uploads/' . $preprocessedFilenameKk;
+                $result['preprocessedImage'] = 'uploads/upload ktp/' . $preprocessedFilenameKtp;
+                $result['originalImageKk'] = 'uploads/upload kk/' . $filenameKk;
+                $result['preprocessedImageKk'] = 'uploads/upload kk/' . $preprocessedFilenameKk;
                 
                 try {
                     // --- 1. PROSES KTP ---
@@ -320,43 +332,44 @@ function cleanupTempatTglLahir($text) {
  * Normalisasi kandidat NIK dari OCR dengan agresif menonormalisir karakter yang sering salah baca.
  * Focus on digits 0-9, handle common OCR confusions.
  */
+/**
+ * Normalisasi kandidat NIK dari OCR.
+ * Hanya konversi karakter yang secara visual SANGAT mirip angka.
+ * Jangan konversi terlalu agresif karena bisa merusak angka yang sudah benar.
+ */
 function normalizeNikCandidate($value) {
     $niks = trim((string)$value);
     error_log("[normalizeNikCandidate] Input: '" . $niks . "'");
     
-    // Remove spaces, dashes, dots
-    $niks = preg_replace('/[\s\-\.\,]/', '', $niks);
+    // Remove spaces, dashes, dots, colons
+    $niks = preg_replace('/[\s\-\.\,:]/', '', $niks);
     
-    // Convert common OCR misreads to digits - COMPREHENSIVE LIST
-    // Based on common scanner errors for digit clarity
-    $niks = preg_replace('/[Oo]/', '0', $niks);      // O/o -> 0 (8 often misread as O)
-    $niks = preg_replace('/[lI|!]/', '1', $niks);    // l/I/|/! -> 1
-    $niks = preg_replace('/[Zz]/', '2', $niks);      // Z/z -> 2
-    $niks = preg_replace('/[Bb]/', '8', $niks);      // B/b -> 8 (8 often misread as B)
-    $niks = preg_replace('/[Ss]/', '5', $niks);      // S/s -> 5 (5 often misread as S)
-    $niks = preg_replace('/[Gg]/', '9', $niks);      // G/g -> 9
-    $niks = preg_replace('/[Qq]/', '0', $niks);      // Q/q -> 0
-    $niks = preg_replace('/[Dd]/', '0', $niks);      // D/d -> 0
+    // Hanya konversi karakter yang secara visual SANGAT MIRIP dengan angka tertentu
+    // dan sering salah baca oleh Tesseract pada dokumen cetak:
+    $niks = str_replace(['O', 'o'], '0', $niks);   // O -> 0 (sangat mirip)
+    $niks = str_replace(['l', 'I'], '1', $niks);   // l/I -> 1 (sangat mirip di font OCR-A)
+    $niks = str_replace(['B'], '8', $niks);         // B -> 8 (mirip di font sempit)
     
-    // Additional mappings for improved accuracy (based on user's error patterns)
-    $niks = preg_replace('/[Tt]/', '1', $niks);      // T/t -> 1 (sometimes confused)
-    $niks = preg_replace('/[Vv]/', '4', $niks);      // V/v -> 4 (sometimes confused)
-    
-    // Remove any remaining non-digits
+    // Remove sisa karakter non-digit
     $niks = preg_replace('/\D/', '', $niks);
     
     error_log("[normalizeNikCandidate] After normalization: '" . $niks . "' (length: " . strlen($niks) . ")");
 
-    // Accept 14+ digits directly without modification
-    // Kembalikan angka hasil OCR apa adanya, jangan ditambah/dikurang
+    if (strlen($niks) >= 16) {
+        $result = substr($niks, 0, 16);
+        error_log("[normalizeNikCandidate] Returning 16 digits: " . $result);
+        return $result;
+    }
+    
     if (strlen($niks) >= 14) {
-        error_log("[normalizeNikCandidate] Accepting " . strlen($niks) . " digits, returning exactly as read: " . $niks);
+        error_log("[normalizeNikCandidate] Returning " . strlen($niks) . " digits: " . $niks);
         return $niks;
     }
 
     error_log("[normalizeNikCandidate] Failed: Only " . strlen($niks) . " digits found (need 14+)");
     return null;
 }
+
 
 /**
  * Create crop of NIK area with standard preprocessing (not aggressive).
@@ -394,35 +407,35 @@ function createNikCropSimple($imagePath, $outputPath) {
         $imageHeight = $dimensions['height'];
         error_log("[createNikCropSimple] Image dimensions: " . $imageWidth . "x" . $imageHeight);
         
-        // Precise crop: NIK is at ~10-25% height, left 65% width (exclude photo)
-        $yStart = (int)($imageHeight * 0.10);
-        $yEnd = (int)($imageHeight * 0.25);
-        $cropWidth = (int)($imageWidth * 0.65);
+        // KTP Indonesia: Header = ~18% (Provinsi + Kota), NIK row = 18-32% height
+        // Crop lebih ke bawah agar tidak menangkap teks kota/provinsi
+        $yStart = (int)($imageHeight * 0.18);
+        $yEnd   = (int)($imageHeight * 0.32);
+        $cropWidth  = (int)($imageWidth * 0.70);  // 70% kiri, hindari foto
         $cropHeight = $yEnd - $yStart;
         error_log("[createNikCropSimple] Crop: y={$yStart}-{$yEnd}, w={$cropWidth}, h={$cropHeight}");
 
         $image->cropImage($cropWidth, $cropHeight, 0, $yStart);
         $image->setImagePage(0, 0, 0, 0);
         
-        // Upscale 3x for better digit OCR
-        $newWidth = $cropWidth * 3;
-        $newHeight = $cropHeight * 3;
+        // Upscale 4x untuk digit OCR yang lebih baik
+        $newWidth  = $cropWidth * 4;
+        $newHeight = $cropHeight * 4;
         $image->scaleImage($newWidth, $newHeight);
         
-        // Convert to grayscale
+        // Convert ke grayscale
         $image->setImageFormat('png');
         $image->transformImageColorspace(Imagick::COLORSPACE_GRAY);
         
-        // Normalize and enhance
+        // Normalize dan enhance
         $image->normalizeImage();
         $image->enhanceImage();
         
-        // Apply threshold for clean binary (black text on white)
-        // Use Otsu-like approach: auto-threshold
-        $image->thresholdImage(0.5 * \Imagick::getQuantum());
+        // Threshold untuk binary bersih (teks hitam di atas putih)
+        $image->thresholdImage(0.55 * \Imagick::getQuantum());
         
-        // Add white border for Tesseract padding
-        $image->borderImage('white', 20, 20);
+        // Padding putih untuk Tesseract
+        $image->borderImage('white', 30, 30);
         
         $image->writeImage($outputPath);
         $image->destroy();
@@ -449,21 +462,18 @@ function createNikCropSimpleGD($imagePath, $outputPath) {
             return false;
         }
 
-        $imageWidth = $imageInfo[0];
+        $imageWidth  = $imageInfo[0];
         $imageHeight = $imageInfo[1];
         error_log("[createNikCropSimpleGD] Image dimensions: " . $imageWidth . "x" . $imageHeight);
 
         // Load image
         switch ($imageInfo[2]) {
             case IMAGETYPE_JPEG:
-                $source = imagecreatefromjpeg($imagePath);
-                break;
+                $source = imagecreatefromjpeg($imagePath); break;
             case IMAGETYPE_PNG:
-                $source = imagecreatefrompng($imagePath);
-                break;
+                $source = imagecreatefrompng($imagePath); break;
             case IMAGETYPE_GIF:
-                $source = imagecreatefromgif($imagePath);
-                break;
+                $source = imagecreatefromgif($imagePath); break;
             default:
                 $source = imagecreatefromstring(file_get_contents($imagePath));
         }
@@ -473,33 +483,33 @@ function createNikCropSimpleGD($imagePath, $outputPath) {
             return false;
         }
 
-        $width = imagesx($source);
+        $width  = imagesx($source);
         $height = imagesy($source);
         
-        // Precise crop: 10-25% height, left 65% width
-        $yStart = (int)($height * 0.10);
-        $cropHeight = (int)($height * 0.15); // 25% - 10% = 15%
-        $cropWidth = (int)($width * 0.65);
+        // KTP Indonesia: NIK row is at 18-32% height
+        $yStart     = (int)($height * 0.18);
+        $cropHeight = (int)($height * 0.14); // 32% - 18% = 14%
+        $cropWidth  = (int)($width * 0.70);  // 70% kiri
         error_log("[createNikCropSimpleGD] Crop: y={$yStart}, w={$cropWidth}, h={$cropHeight}");
         
-        // Create crop
+        // Crop
         $crop = imagecreatetruecolor($cropWidth, $cropHeight);
         imagecopy($crop, $source, 0, 0, 0, $yStart, $cropWidth, $cropHeight);
         imagedestroy($source);
         
-        // Upscale 3x
-        $newWidth = $cropWidth * 3;
-        $newHeight = $cropHeight * 3;
-        $upscaled = imagecreatetruecolor($newWidth, $newHeight);
+        // Upscale 4x
+        $newWidth  = $cropWidth * 4;
+        $newHeight = $cropHeight * 4;
+        $upscaled  = imagecreatetruecolor($newWidth, $newHeight);
         imagecopyresampled($upscaled, $crop, 0, 0, 0, 0, $newWidth, $newHeight, $cropWidth, $cropHeight);
         imagedestroy($crop);
         
-        // Convert to grayscale
+        // Grayscale
         @imagefilter($upscaled, IMG_FILTER_GRAYSCALE);
         
-        // Increase contrast strongly for near-binary output
-        @imagefilter($upscaled, IMG_FILTER_BRIGHTNESS, 20);
-        @imagefilter($upscaled, IMG_FILTER_CONTRAST, -80);
+        // Kontrast tinggi untuk teks digit
+        @imagefilter($upscaled, IMG_FILTER_BRIGHTNESS, 10);
+        @imagefilter($upscaled, IMG_FILTER_CONTRAST, -70);
         
         // Sharpen
         $sharpenMatrix = [
@@ -509,11 +519,11 @@ function createNikCropSimpleGD($imagePath, $outputPath) {
         ];
         @imageconvolution($upscaled, $sharpenMatrix, 4, 0);
         
-        // Add white border (20px padding)
-        $bordered = imagecreatetruecolor($newWidth + 40, $newHeight + 40);
-        $white = imagecolorallocate($bordered, 255, 255, 255);
+        // Padding putih 30px
+        $bordered = imagecreatetruecolor($newWidth + 60, $newHeight + 60);
+        $white    = imagecolorallocate($bordered, 255, 255, 255);
         imagefill($bordered, 0, 0, $white);
-        imagecopy($bordered, $upscaled, 20, 20, 0, 0, $newWidth, $newHeight);
+        imagecopy($bordered, $upscaled, 30, 30, 0, 0, $newWidth, $newHeight);
         imagedestroy($upscaled);
         
         imagepng($bordered, $outputPath, 0);
@@ -941,68 +951,75 @@ function extractKtpFields($text, $imagePath = null) {
         'agama' => null,
         'status_perkawinan' => null,
         'pekerjaan' => null,
-        'kewarganegaraan' => null,
-        'berlaku_hingga' => null,
     ];
     
     // Split text menjadi lines untuk processing
     $lines = explode("\n", $text);
     $fullText = strtolower($text); // untuk searching multi-line patterns
     
-    // Pattern untuk setiap field dengan multiple fallbacks
+    // ============================================================
+    // LANGKAH 1: Extract NIK menggunakan crop gambar (PRIORITAS UTAMA)
+    // Image crop jauh lebih akurat dari parsing teks OCR yang sering noise
+    // ============================================================
+    if ($imagePath !== null) {
+        $imageNikDirect = extractNikFromImage($imagePath);
+        if (!empty($imageNikDirect)) {
+            $fields['nik'] = $imageNikDirect;
+            error_log("[NIK] Direct image crop SUCCESS: " . $imageNikDirect);
+        }
+    }
+
+    // ============================================================
+    // LANGKAH 2: Parse baris per baris untuk field lainnya (dan NIK sebagai fallback)
+    // ============================================================
     foreach ($lines as $lineIndex => $line) {
         $line = trim($line);
         if (empty($line)) continue;
         $lineLower = strtolower($line);
         
-        // 1. Extract NIK (14-16 digit)
-        // OCR sering menggabungkan field lain (mis: "KOTA TANJUNGBALAI NIK : 75323711058188")
-        // dalam satu baris. Strategi: isolasi teks SETELAH keyword NIK terlebih dahulu.
-        if (stripos($lineLower, 'nik') !== false) {
+        // NIK: hanya coba dari teks jika image crop gagal
+        if (empty($fields['nik']) && stripos($lineLower, 'nik') !== false) {
             $nikCandidate = null;
 
-            // Step A: Isolasi teks setelah keyword NIK untuk hindari prefix kota/field lain
+            // Step A: Isolasi teks tepat SETELAH keyword NIK, buang semua prefix
             $nikPart = '';
-            if (preg_match('/NIK\s*[:=]?\s*([0-9A-Za-z?|!\s\.\-]{8,25})/i', $line, $preMatches)) {
+            if (preg_match('/NIK\s*[:\-=]?\s*([0-9OolISZBb8\s\.]{10,25})/i', $line, $preMatches)) {
                 $nikPart = trim($preMatches[1]);
-                // Jika masih ada ':', ambil bagian setelah ':' terakhir
-                if (strpos($nikPart, ':') !== false) {
-                    $parts = explode(':', $nikPart);
-                    $nikPart = trim(end($parts));
-                }
-                error_log("[NIK] Isolated NIK part: '" . $nikPart . "'");
+                error_log("[NIK] Isolated NIK part after keyword: '" . $nikPart . "'");
             }
 
-            // Step B: Ambil sequence digit-OCR dari nikPart
-            if (!empty($nikPart) && preg_match('/([0-9OolISZBb8\.\-]{10,20})/', $nikPart, $matches)) {
-                $nikCandidate = $matches[1];
-                error_log("[NIK] Pattern 1 (isolated): '" . $nikCandidate . "'");
-            }
-
-            // Step C: Fallback dari baris penuh jika Step B gagal
-            if (empty($nikCandidate)) {
-                if (preg_match('/NIK\s*[:=]?\s*([0-9OolISZB8\.\-]{10,20})/i', $line, $matches)) {
+            // Step B: Bersihkan nikPart
+            if (!empty($nikPart)) {
+                $nikCompact = preg_replace('/\s+/', '', $nikPart);
+                if (preg_match('/([0-9OolIBb]{14,18})/', $nikCompact, $matches)) {
                     $nikCandidate = $matches[1];
-                    error_log("[NIK] Pattern 2 (full line): " . $nikCandidate);
-                } elseif (preg_match('/NIK[:\s]+([0-9OolISZB8\s\.\-]{10,25}?)(?:\s{2,}|[^0-9OolISZB8\s\.\-]|$)/i', $line, $matches)) {
-                    $nikCandidate = trim($matches[1]);
-                    error_log("[NIK] Pattern 3 (lenient): " . $nikCandidate);
-                } elseif (preg_match('/([0-9OolISZB8dqg]{14,18})/', $line, $matches)) {
-                    if (preg_match('/\d{12,}/', $matches[1])) {
-                        $nikCandidate = $matches[1];
-                        error_log("[NIK] Pattern 4 (digit seq): " . $nikCandidate);
+                    error_log("[NIK] Pattern 1 (isolated compact): '" . $nikCandidate . "'");
+                } elseif (preg_match('/([0-9OolIBb\.\-]{10,20})/', $nikPart, $matches)) {
+                    $nikCandidate = $matches[1];
+                    error_log("[NIK] Pattern 1b (isolated spaced): '" . $nikCandidate . "'");
+                }
+            }
+
+            // Step C: Fallback - cari sequence digit terpanjang di baris
+            if (empty($nikCandidate)) {
+                preg_match_all('/[0-9OolIBb]{6,}/', $line, $allDigitGroups);
+                if (!empty($allDigitGroups[0])) {
+                    usort($allDigitGroups[0], function($a, $b) { return strlen($b) - strlen($a); });
+                    foreach ($allDigitGroups[0] as $group) {
+                        if (strlen($group) >= 14) {
+                            $nikCandidate = $group;
+                            error_log("[NIK] Pattern C (longest group): '" . $nikCandidate . "'");
+                            break;
+                        }
                     }
                 }
             }
 
             if (!empty($nikCandidate)) {
-                error_log("[NIK] Before normalize: " . $nikCandidate);
-                $nikCandidate = normalizeNikCandidate($nikCandidate);
-                error_log("[NIK] After normalize: " . ($nikCandidate ?? 'NULL'));
-
-                if ($nikCandidate !== null) {
-                    $fields['nik'] = $nikCandidate;
-                    error_log("[NIK] EXTRACTED: " . $nikCandidate);
+                $nikNormalized = normalizeNikCandidate($nikCandidate);
+                if ($nikNormalized !== null && $nikNormalized[0] !== '0') {
+                    $fields['nik'] = $nikNormalized;
+                    error_log("[NIK] Text parsing SUCCESS: " . $nikNormalized);
                 }
             } else {
                 error_log("[NIK] No pattern matched for line with 'NIK' keyword");
@@ -1010,15 +1027,35 @@ function extractKtpFields($text, $imagePath = null) {
         }
         
         // 2. Extract Nama (text setelah "Nama")
+        // PENTING: Potong jika muncul keyword field lain (Tempat, Tgl, Lahir, dll)
         if (preg_match('/Nama\s*[:=]\s*([^|\n\r]+)/i', $line, $matches)) {
             $nama = trim($matches[1]);
-            // Potong sebelum digit pertama (NIK/nomor tidak seharusnya di nama)
-            $nama = preg_replace('/\s*\d+.*$/s', '', $nama);
+            
+            // Potong TEPAT sebelum keyword field berikutnya yang mungkin ikut terbaca di baris sama
+            // seperti: "T. IRWAN YOLANDA, M.FARM tgl : Tempat"
+            $stopKeywords = [
+                'Tempat', 'Tgl', 'Lahir', 'Jenis', 'Kelamin', 'Gol', 'Darah',
+                'Alamat', 'RT', 'RW', 'Kel', 'Kecamatan', 'Agama', 'Status',
+                'Pekerjaan', 'Kewarganegaraan', 'Berlaku'
+            ];
+            foreach ($stopKeywords as $kw) {
+                // Potong di keyword yang muncul sebagai kata utuh (case-insensitive)
+                if (preg_match('/\b' . preg_quote($kw, '/') . '\b/i', $nama, $m, PREG_OFFSET_CAPTURE)) {
+                    $nama = substr($nama, 0, $m[0][1]);
+                }
+            }
+            
+            // Potong sebelum digit panjang (bukan inisial/angka nama)
+            $nama = preg_replace('/\s+\d{3,}.*$/s', '', $nama);
+            
             $nama = cleanupOCRNoise($nama);
             $nama = cleanupFieldValue($nama, 'nama');
-            // Hanya ambil huruf, spasi, titik, koma, tanda hubung
+            // Hanya ambil huruf, spasi, titik, koma, tanda hubung, apostrophe
             $nama = preg_replace('/[^A-Za-z\s\.\,\-\']/u', '', $nama);
             $nama = preg_replace('/\s+/', ' ', $nama);
+            $nama = trim($nama);
+            // Hapus trailing noise: kata pendek <= 2 huruf di akhir (bukan inisial)
+            $nama = preg_replace('/\s+[a-zA-Z]{1,2}\s*$/', '', $nama);
             $nama = trim($nama);
             if (!empty($nama) && strlen($nama) > 2) {
                 $fields['nama'] = strtoupper($nama);
@@ -1321,53 +1358,6 @@ function extractKtpFields($text, $imagePath = null) {
                 $fields['pekerjaan'] = $pekerjaan;
             }
         }
-        
-        // 18. Extract Kewarganegaraan â€” hanya WNI atau WNA
-        if (preg_match('/Kewarganegaraan\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
-            $kewarga = strtoupper(trim($matches[1]));
-            // Cari WNI atau WNA di teks
-            if (preg_match('/\b(WNI|WNA)\b/i', $kewarga, $kwMatches)) {
-                $fields['kewarganegaraan'] = strtoupper($kwMatches[1]);
-            } else {
-                // Fallback: bersihkan dan ambil kata pertama
-                $kewarga = cleanupOCRNoise($kewarga);
-                $words = explode(' ', $kewarga);
-                if (!empty($words[0]) && strlen($words[0]) >= 3) {
-                    $fields['kewarganegaraan'] = strtoupper($words[0]);
-                }
-            }
-        }
-        
-        // 19. Extract Berlaku Hingga - dengan multiple format fallbacks
-        // Format 1: "Berlaku Hingga : 25-01-2035" (with date)
-        if (preg_match('/Berlaku\s+(?:Hingga|sampai|s\.d\.?)\s*[:=]\s*(\d{1,2}[-\/]\d{1,2}[-\/]\d{4})/i', $line, $matches)) {
-            if (empty($fields['berlaku_hingga'])) {
-                $fields['berlaku_hingga'] = trim($matches[1]);
-            }
-        }
-        // Format 2: "Berlaku Hingga : SEUMUR HIDUP" (text-based)
-        else if (preg_match('/Berlaku\s+(?:Hingga|sampai|Hing[g]?ga)\s*[:=]\s*([^\n\r|]+)/i', $line, $matches)) {
-            $berlaku = trim($matches[1]);
-            if (!empty($berlaku) && strlen($berlaku) > 2) {
-                if (empty($fields['berlaku_hingga'])) {
-                    // Check if it's a date or text
-                    if (preg_match('/(\d{1,2}[-\/]\d{1,2}[-\/]\d{4})/', $berlaku, $dateMatches)) {
-                        $fields['berlaku_hingga'] = $dateMatches[1];
-                    } else {
-                        // It's a text value like "SEUMUR HIDUP"
-                        $fields['berlaku_hingga'] = $berlaku;
-                    }
-                }
-            }
-        }
-        // Format 3: Fallback - "Berlaku" keyword with value after
-        else if (empty($fields['berlaku_hingga']) && preg_match('/Berlaku\s+[>:\-=]\s*(.+)/i', $line, $matches)) {
-            $berlaku = trim($matches[1]);
-            $berlaku = cleanupOCRNoise($berlaku);  // Remove OCR noise
-            if (!empty($berlaku) && strlen($berlaku) > 2) {
-                $fields['berlaku_hingga'] = $berlaku;
-            }
-        }
     }
     
     // Cleanup dan normalisasi fields
@@ -1578,6 +1568,195 @@ if (isset($_GET['json'])) {
     echo json_encode($result, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit;
 }
+
+// =========================================================================
+// FITUR PENGUJIAN AKURASI KTP (CER)
+// =========================================================================
+function calculateCER($ocrResult, $groundTruth) {
+    $ocrResult = strtolower(trim((string)$ocrResult));
+    $groundTruth = strtolower(trim((string)$groundTruth));
+    $ocrResult = preg_replace('/\s+/', ' ', $ocrResult);
+    $groundTruth = preg_replace('/\s+/', ' ', $groundTruth);
+    $N = strlen($groundTruth);
+    if ($N === 0) return strlen($ocrResult) > 0 ? 100 : 0;
+    return min((levenshtein($ocrResult, $groundTruth) / $N) * 100, 100);
+}
+
+if (isset($_GET['run_test']) && $_GET['run_test'] == '1') {
+    ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    set_time_limit(0); // Mencegah timeout karena OCR memakan waktu lama
+
+    $datasetFile = __DIR__ . '/dataset.json';
+    if (!file_exists($datasetFile)) {
+        echo json_encode(['success' => false, 'message' => 'File dataset.json tidak ditemukan di folder!']);
+        exit;
+    }
+
+    $dataset = json_decode(file_get_contents($datasetFile), true);
+    
+    // Filter dataset hanya untuk gambar yang diupload jika parameter filename tersedia
+    if (isset($_GET['filename']) && !empty($_GET['filename'])) {
+        $targetFilename = $_GET['filename'];
+        $dataset = array_filter($dataset, function($data) use ($targetFilename) {
+            return basename($data['image_path']) === $targetFilename;
+        });
+        
+        if (empty($dataset)) {
+            echo json_encode(['success' => false, 'message' => 'Gambar ' . htmlspecialchars($targetFilename) . ' tidak memiliki ground truth di dataset.json!']);
+            exit;
+        }
+    }
+
+    $testResults = [];
+    $fieldStats = [];
+
+    foreach ($dataset as $data) {
+        $imagePath = __DIR__ . '/' . $data['image_path'];
+        $groundTruth = $data['ground_truth'];
+        
+        $itemResult = ['image' => basename($imagePath), 'fields' => [], 'error' => null];
+
+        if (!file_exists($imagePath)) {
+            $itemResult['error'] = 'Gambar tidak ditemukan';
+            $testResults[] = $itemResult;
+            continue;
+        }
+
+        $tempPreprocessed = __DIR__ . '/uploads/temp_test_' . uniqid() . '.png';
+        
+        try {
+            if (preprocessImage($imagePath, $tempPreprocessed)) {
+                $ocr = new TesseractOCR($tempPreprocessed);
+                $ocr->lang('ind+eng')->psm(6)->oem(3);
+                $rawText = $ocr->run();
+                
+                $processedText = postProcessOCRText(trim((string)$rawText));
+                $extractedFields = extractKtpFields($processedText, $tempPreprocessed);
+                
+                foreach ($groundTruth as $fieldKey => $expectedValue) {
+                    $actualValue = $extractedFields[$fieldKey] ?? '';
+                    $cer = calculateCER($actualValue, $expectedValue);
+                    $akurasi = 100 - $cer;
+
+                    $itemResult['fields'][$fieldKey] = [
+                        'expected' => $expectedValue,
+                        'actual' => $actualValue,
+                        'cer' => round($cer, 2),
+                        'akurasi' => round($akurasi, 2)
+                    ];
+
+                    if (!isset($fieldStats[$fieldKey])) {
+                        $fieldStats[$fieldKey] = ['sum_cer' => 0, 'count' => 0];
+                    }
+                    $fieldStats[$fieldKey]['sum_cer'] += $cer;
+                    $fieldStats[$fieldKey]['count']++;
+                }
+                unlink($tempPreprocessed);
+            }
+        } catch (Exception $e) {
+            $itemResult['error'] = $e->getMessage();
+        }
+        $testResults[] = $itemResult;
+    }
+
+    echo json_encode([
+        'success' => true, 
+        'results' => $testResults, 
+        'stats' => $fieldStats
+    ]);
+    exit;
+}
+// =========================================================================
+// FITUR PENGUJIAN AKURASI KK (CER)
+// =========================================================================
+if (isset($_GET['run_test_kk']) && $_GET['run_test_kk'] == '1') {
+    ob_end_clean();
+    header('Content-Type: application/json; charset=utf-8');
+    set_time_limit(0); // Mencegah timeout karena OCR memakan waktu lama
+
+    $datasetFile = __DIR__ . '/dataset_kk.json';
+    if (!file_exists($datasetFile)) {
+        echo json_encode(['success' => false, 'message' => 'File dataset_kk.json tidak ditemukan! Pastikan Anda sudah membuatnya.']);
+        exit;
+    }
+
+    $dataset = json_decode(file_get_contents($datasetFile), true);
+    
+    // Filter dataset hanya untuk gambar KK yang diupload jika parameter filename tersedia
+    if (isset($_GET['filename']) && !empty($_GET['filename'])) {
+        $targetFilename = $_GET['filename'];
+        $dataset = array_filter($dataset, function($data) use ($targetFilename) {
+            return basename($data['image_path']) === $targetFilename;
+        });
+        
+        if (empty($dataset)) {
+            echo json_encode(['success' => false, 'message' => 'Gambar KK ' . htmlspecialchars($targetFilename) . ' tidak memiliki kunci jawaban di dataset_kk.json!']);
+            exit;
+        }
+    }
+
+    $testResults = [];
+    $fieldStats = [];
+
+    foreach ($dataset as $data) {
+        $imagePath = __DIR__ . '/' . $data['image_path'];
+        $groundTruth = $data['ground_truth'];
+        
+        $itemResult = ['image' => basename($imagePath), 'fields' => [], 'error' => null];
+
+        if (!file_exists($imagePath)) {
+            $itemResult['error'] = 'Gambar tidak ditemukan di folder';
+            $testResults[] = $itemResult;
+            continue;
+        }
+
+        $tempPreprocessed = __DIR__ . '/uploads/temp_test_kk_' . uniqid() . '.png';
+        
+        try {
+            if (preprocessImage($imagePath, $tempPreprocessed)) {
+                $ocr = new TesseractOCR($tempPreprocessed);
+                $ocr->lang('ind+eng')->psm(6)->oem(3);
+                $rawText = $ocr->run();
+                
+                // EKSTRAK KHUSUS NOMOR KK
+                $extractedNomorKk = extractNomorKK($rawText);
+                $extractedFields = ['nomor_kk' => $extractedNomorKk ?? ''];
+                
+                foreach ($groundTruth as $fieldKey => $expectedValue) {
+                    $actualValue = $extractedFields[$fieldKey] ?? '';
+                    $cer = calculateCER($actualValue, $expectedValue);
+                    $akurasi = 100 - $cer;
+
+                    $itemResult['fields'][$fieldKey] = [
+                        'expected' => $expectedValue,
+                        'actual' => $actualValue,
+                        'cer' => round($cer, 2),
+                        'akurasi' => round($akurasi, 2)
+                    ];
+
+                    if (!isset($fieldStats[$fieldKey])) {
+                        $fieldStats[$fieldKey] = ['sum_cer' => 0, 'count' => 0];
+                    }
+                    $fieldStats[$fieldKey]['sum_cer'] += $cer;
+                    $fieldStats[$fieldKey]['count']++;
+                }
+                unlink($tempPreprocessed);
+            }
+        } catch (Exception $e) {
+            $itemResult['error'] = $e->getMessage();
+        }
+        $testResults[] = $itemResult;
+    }
+
+    echo json_encode([
+        'success' => true, 
+        'results' => $testResults, 
+        'stats' => $fieldStats
+    ]);
+    exit;
+}
+// =========================================================================
 
 // Clear output buffer untuk HTML response
 ob_end_clean();
@@ -2012,10 +2191,13 @@ ob_end_clean();
                         <div class="filename" id="filenameKk"></div>
                     </div>
                 </div>
-                <div class="form-group">
-                    <button type="submit" class="btn btn-primary">Konversi ke Teks</button>
-                    <button type="reset" class="btn btn-secondary" style="width: 100%;">Reset</button>
-                </div>
+               <div class="form-group">
+    <button type="submit" class="btn btn-primary">Konversi ke Teks</button>
+    <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button type="reset" class="btn btn-secondary" style="flex: 1; margin-top: 0;">Reset Form</button>
+        <button type="button" id="btnTestAkurasiCombined" class="btn btn-secondary" style="flex: 2; margin-top: 0; background: #17a2b8; color: white; font-weight: bold; border: none; cursor: pointer;">📊 Uji Akurasi KTP & KK Sekaligus</button>
+    </div>
+</div>
             </form>
             
             <div class="loading" id="loading">
@@ -2051,6 +2233,9 @@ ob_end_clean();
                         <button class="copy-btn" onclick="copyFieldsToClipboard()" style="margin-top: 20px;">📋 Salin Semua Data</button>
                     </div>
                 </div>
+                
+                <!-- Tempat untuk Hasil Uji Akurasi -->
+                <div id="accuracyResult" style="margin-top: 30px;"></div>
             </div>
         </div>
     </div>
@@ -2263,9 +2448,7 @@ ob_end_clean();
                     'provinsi': '🌎 Provinsi',
                     'agama': '⛪ Agama',
                     'status_perkawinan': '💍 Status Perkawinan',
-                    'pekerjaan': '👔 Pekerjaan',
-                    'kewarganegaraan': '🛂 Kewarganegaraan',
-                    'berlaku_hingga': '⏳ Berlaku Hingga'
+                    'pekerjaan': '👔 Pekerjaan'
                 };
                 
                 let fieldsHTML = '';
@@ -2413,7 +2596,152 @@ ob_end_clean();
             resultSection.classList.remove('show');
             loading.classList.remove('show');
         });
+
+        // Handler untuk Tombol Uji Akurasi KTP & KK (Gabungan)
+        document.getElementById('btnTestAkurasiCombined').addEventListener('click', async () => {
+            const imageInputKtp = document.getElementById('imageInputKtp');
+            const imageInputKk = document.getElementById('imageInputKk');
+
+            // Validasi form harus terisi dua-duanya
+            if (!imageInputKtp.files.length || !imageInputKk.files.length) {
+                showMessage('Harap upload gambar KTP dan KK terlebih dahulu untuk diuji.', 'error');
+                return;
+            }
+
+            const ktpFilename = imageInputKtp.files[0].name;
+            const kkFilename = imageInputKk.files[0].name;
+
+            const resultSection = document.getElementById('resultSection');
+            const accuracyResult = document.getElementById('accuracyResult');
+            const loading = document.getElementById('loading');
+            
+            resultSection.classList.add('show');
+            loading.classList.add('show');
+            accuracyResult.innerHTML = '';
+            
+            try {
+                // Fetch API KTP dan KK secara BERSAMAAN (Paralel) menggunakan Promise.all
+                const [resKtp, resKk] = await Promise.all([
+                    fetch(window.location.href + '?run_test=1&filename=' + encodeURIComponent(ktpFilename)),
+                    fetch(window.location.href + '?run_test_kk=1&filename=' + encodeURIComponent(kkFilename))
+                ]);
+
+                const dataKtp = await resKtp.json();
+                const dataKk = await resKk.json();
+                
+                loading.classList.remove('show');
+                
+                // Gabungkan Laporan KTP dan KK
+                let combinedData = {
+                    stats: {},
+                    results: [],
+                    success: false
+                };
+                
+                let errorMessages = [];
+
+                if (dataKtp.success) {
+                    combinedData.success = true;
+                    Object.assign(combinedData.stats, dataKtp.stats);
+                    dataKtp.results.forEach(res => {
+                        res.image = res.image + ' (KTP)';
+                        combinedData.results.push(res);
+                    });
+                } else {
+                    errorMessages.push(`KTP: ${dataKtp.message}`);
+                }
+
+                if (dataKk.success) {
+                    combinedData.success = true;
+                    Object.assign(combinedData.stats, dataKk.stats);
+                    dataKk.results.forEach(res => {
+                        res.image = res.image + ' (KK)';
+                        combinedData.results.push(res);
+                    });
+                } else {
+                    errorMessages.push(`KK: ${dataKk.message}`);
+                }
+                
+                let htmlReport = '';
+                
+                if (errorMessages.length > 0) {
+                    errorMessages.forEach(msg => {
+                        htmlReport += `<div style="padding: 15px; background: #f8d7da; border-left: 4px solid #721c24; margin-bottom: 20px;"><strong>Error:</strong> ${msg}</div>`;
+                    });
+                }
+
+                if (combinedData.success) {
+                    htmlReport += generateReportHTML(combinedData, 'KTP & KK (Gabungan)', '#17a2b8'); // Gunakan satu warna dan tabel
+                }
+
+                accuracyResult.innerHTML = htmlReport;
+
+            } catch (error) {
+                loading.classList.remove('show');
+                showMessage('Terjadi kesalahan saat memproses pengujian: ' + error.message, 'error');
+            }
+        });
+
+        /**
+         * Helper function untuk merender tabel laporan HTML agar kode tidak berulang
+         */
+        function generateReportHTML(data, title, color) {
+            let html = `
+                <div style="background: white; padding: 20px; border-radius: 8px; border-left: 4px solid ${color}; margin-bottom: 25px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
+                    <h3 style="margin-bottom: 15px; color: #333;">📊 Laporan Akurasi ${title}</h3>
+                    
+                    <h4 style="margin: 15px 0 10px;">Rata-rata Akurasi per Kolom</h4>
+                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+                        <tr style="background: ${color}; color: white;">
+                            <th style="padding: 10px; border: 1px solid #ddd; text-align: left;">Kolom (Field)</th>
+                            <th style="padding: 10px; border: 1px solid #ddd; text-align: center;">Akurasi Rata-rata</th>
+                        </tr>`;
+            
+            for (const [field, stat] of Object.entries(data.stats)) {
+                let avgAkurasi = 100 - (stat.sum_cer / stat.count);
+                let textColor = avgAkurasi >= 90 ? '#155724' : (avgAkurasi >= 70 ? '#856404' : '#721c24');
+                html += `
+                    <tr>
+                        <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold;">${field.toUpperCase()}</td>
+                        <td style="padding: 10px; border: 1px solid #ddd; text-align: center; color: ${textColor}; font-weight: bold;">${avgAkurasi.toFixed(2)}%</td>
+                    </tr>`;
+            }
+            
+            html += `</table><h4 style="margin: 20px 0 10px;">Detail Pembacaan OCR</h4>`;
+
+            data.results.forEach(res => {
+                if (res.error) {
+                    html += `<div style="padding: 10px; background: #f8d7da; border: 1px solid #f5c6cb; margin-bottom: 10px;">${res.image} - Error: ${res.error}</div>`;
+                    return;
+                }
+
+                html += `
+                    <div style="margin-bottom: 15px; border: 1px solid #eee; border-radius: 5px; overflow: hidden;">
+                        <div style="background: #f8f9fa; padding: 10px; font-weight: bold; border-bottom: 1px solid #eee;">📄 ${res.image}</div>
+                        <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                            <tr style="background: #f1f3f5;">
+                                <th style="padding: 8px; border: 1px solid #ddd;">Field</th>
+                                <th style="padding: 8px; border: 1px solid #ddd;">Ground Truth (Jawaban)</th>
+                                <th style="padding: 8px; border: 1px solid #ddd;">Hasil Mesin OCR</th>
+                                <th style="padding: 8px; border: 1px solid #ddd; text-align: center;">Akurasi</th>
+                            </tr>`;
+                            
+                for (const [field, val] of Object.entries(res.fields)) {
+                    let textColor = val.akurasi >= 90 ? '#155724' : (val.akurasi >= 70 ? '#856404' : '#721c24');
+                    html += `
+                        <tr>
+                            <td style="padding: 8px; border: 1px solid #ddd;">${field}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd;">${val.expected}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd;">${val.actual}</td>
+                            <td style="padding: 8px; border: 1px solid #ddd; text-align: center; color: ${textColor}; font-weight: bold;">${val.akurasi}%</td>
+                        </tr>`;
+                }
+                html += `</table></div>`;
+            });
+
+            html += `</div>`;
+            return html;
+        }
     </script>
 </body>
 </html>
-
