@@ -223,6 +223,7 @@ function cleanupFieldValue($value, $field = '') {
     $watermarkWords = [
         'KARTU', 'TANDA', 'PENDUDUK', 'REPUBLIK', 'INDONESIA',
         'BERLAKU', 'SEUMUR', 'HIDUP',
+        'PENDU', 'NDUK', 'TAND', 'ANDA',
     ];
     // Hanya hapus watermark jika bukan field berlaku_hingga
     if ($field !== 'berlaku_hingga') {
@@ -230,6 +231,19 @@ function cleanupFieldValue($value, $field = '') {
             // Hapus jika muncul di AKHIR teks (bukan bagian dari nilai asli)
             $value = preg_replace('/\s+' . preg_quote($ww, '/') . '\s*$/i', '', $value);
         }
+    }
+    
+    // Khusus field nama: hapus noise watermark yang lebih agresif
+    if ($field === 'nama') {
+        // Hapus pola kata pendek yang berulang di akhir: "SA SA", "KA KA", "DU DU", dll
+        // Ini adalah artefak watermark yang terpotong OCR
+        $value = preg_replace('/(?:\s+([A-Z]{1,4}))\s+\1(?:\s+\1)*\s*$/i', '', $value);
+        
+        // Hapus satu kata pendek (1-4 huruf) yang berdiri sendiri di akhir
+        // tapi BUKAN gelar umum seperti S.E, M.M, drg., dr., S.Sos, dll
+        // Gelar yang diizinkan: huruf besar + titik atau kombinasi
+        $value = preg_replace('/\s+[A-Z]{1,3}\s*-\s*$/i', '', $value);  // hapus "SA -", "KA -"
+        $value = preg_replace('/\s+-\s*$/', '', $value);  // hapus trailing " -"
     }
     
     // Strip trailing tanggal (dd-mm-yyyy atau dd - mm - yyyy)
@@ -1032,14 +1046,12 @@ function extractKtpFields($text, $imagePath = null) {
             $nama = trim($matches[1]);
             
             // Potong TEPAT sebelum keyword field berikutnya yang mungkin ikut terbaca di baris sama
-            // seperti: "T. IRWAN YOLANDA, M.FARM tgl : Tempat"
             $stopKeywords = [
                 'Tempat', 'Tgl', 'Lahir', 'Jenis', 'Kelamin', 'Gol', 'Darah',
                 'Alamat', 'RT', 'RW', 'Kel', 'Kecamatan', 'Agama', 'Status',
                 'Pekerjaan', 'Kewarganegaraan', 'Berlaku'
             ];
             foreach ($stopKeywords as $kw) {
-                // Potong di keyword yang muncul sebagai kata utuh (case-insensitive)
                 if (preg_match('/\b' . preg_quote($kw, '/') . '\b/i', $nama, $m, PREG_OFFSET_CAPTURE)) {
                     $nama = substr($nama, 0, $m[0][1]);
                 }
@@ -1050,12 +1062,24 @@ function extractKtpFields($text, $imagePath = null) {
             
             $nama = cleanupOCRNoise($nama);
             $nama = cleanupFieldValue($nama, 'nama');
+            
             // Hanya ambil huruf, spasi, titik, koma, tanda hubung, apostrophe
             $nama = preg_replace('/[^A-Za-z\s\.\,\-\']/u', '', $nama);
             $nama = preg_replace('/\s+/', ' ', $nama);
             $nama = trim($nama);
-            // Hapus trailing noise: kata pendek <= 2 huruf di akhir (bukan inisial)
-            $nama = preg_replace('/\s+[a-zA-Z]{1,2}\s*$/', '', $nama);
+            
+            // Hapus pola berulang di akhir: "SA SA", "KA KA", "DU DU"
+            // Ini adalah sisa watermark KTP yang terpotong OCR
+            $nama = preg_replace('/(?:\s+([A-Za-z]{1,4}))(?:\s+\1)+\s*$/i', '', $nama);
+            
+            // Hapus trailing noise: kata 1-3 huruf + tanda hubung, atau satu kata 1-3 huruf
+            $nama = preg_replace('/\s+[A-Za-z]{1,3}\s*-\s*$/i', '', $nama);
+            $nama = preg_replace('/\s+-\s*$/', '', $nama);
+            
+            // Hapus trailing kata 1-2 huruf yang bukan singkatan gelar (gelar biasanya diikuti titik)
+            // Contoh: "SINAGA SA" -> "SINAGA"
+            $nama = preg_replace('/\s+[A-Z]{1,2}\s*$/u', '', $nama);
+            
             $nama = trim($nama);
             if (!empty($nama) && strlen($nama) > 2) {
                 $fields['nama'] = strtoupper($nama);
