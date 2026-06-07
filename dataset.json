@@ -334,5 +334,12 @@
             "nik": "4408961405699310",
             "nama": "MUSTOFA HIDAYANTO"
         }
+    },
+    {
+        "image_path": "uploads/KTPku_copy.png",
+        "ground_truth": {
+            "nik": "3505142311030001",
+            "nama": "FATRIYA IBNU ASH SHIDIQQI"
+        }
     }
 ]

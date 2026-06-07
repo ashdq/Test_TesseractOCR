@@ -61,48 +61,83 @@
             const loading = document.getElementById('loading');
             const resultSection = document.getElementById('resultSection');
 
+            // Tambahkan progress bar ke UI loading
+            loading.innerHTML += `
+                <div style="margin-top:25px; text-align:left;">
+                    <div style="background:#e9ecef; border-radius:5px; height:20px; overflow:hidden;">
+                        <div id="progressBar" style="background:#17a2b8; width:0%; height:100%; transition: width 0.3s ease;"></div>
+                    </div>
+                    <div id="progressText" style="margin-top:10px; color:#666; font-size:14px; font-weight:bold;">Persiapan membaca dataset...</div>
+                </div>
+            `;
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+
             try {
-                // Fetch KTP and KK directly using index.php backend
-                const [resKtp, resKk] = await Promise.all([
-                    fetch('index.php?run_test=1'),
-                    fetch('index.php?run_test_kk=1')
+                // Ambil daftar file dari dataset JSON secara langsung
+                const [ktpRes, kkRes] = await Promise.all([
+                    fetch('dataset.json').then(r => r.json()).catch(() => []),
+                    fetch('dataset_kk.json').then(r => r.json()).catch(() => [])
                 ]);
 
-                const dataKtp = await resKtp.json();
-                const dataKk = await resKk.json();
+                let tasks = [];
+                if (Array.isArray(ktpRes)) {
+                    ktpRes.forEach(item => {
+                        let filename = item.image_path.split('/').pop();
+                        tasks.push({ type: 'KTP', url: 'index.php?run_test=1&filename=' + encodeURIComponent(filename), filename });
+                    });
+                }
+                if (Array.isArray(kkRes)) {
+                    kkRes.forEach(item => {
+                        let filename = item.image_path.split('/').pop();
+                        tasks.push({ type: 'KK', url: 'index.php?run_test_kk=1&filename=' + encodeURIComponent(filename), filename });
+                    });
+                }
+
+                let combinedData = { stats: {}, results: [], success: true };
+                let errorMessages = [];
+                let totalTasks = tasks.length;
+                let completedTasks = 0;
+
+                if (totalTasks === 0) {
+                    throw new Error("Dataset kosong atau file dataset.json tidak ditemukan.");
+                }
+
+                // Proses file satu per satu (sekuensial) agar tidak memberatkan server & browser
+                for (let task of tasks) {
+                    progressText.innerText = `Memproses OCR ${task.type}: ${task.filename} (${completedTasks + 1}/${totalTasks})`;
+                    
+                    try {
+                        let res = await fetch(task.url);
+                        let data = await res.json();
+                        
+                        if (data.success && data.results && data.results.length > 0) {
+                            // Gabungkan statistik
+                            if (data.stats) {
+                                for (let [field, stat] of Object.entries(data.stats)) {
+                                    if (!combinedData.stats[field]) combinedData.stats[field] = { sum_cer: 0, count: 0 };
+                                    combinedData.stats[field].sum_cer += stat.sum_cer;
+                                    combinedData.stats[field].count += stat.count;
+                                }
+                            }
+                            // Gabungkan hasil
+                            data.results.forEach(r => {
+                                r.image = r.image + ` (${task.type})`;
+                                combinedData.results.push(r);
+                            });
+                        } else {
+                            errorMessages.push(`${task.type} (${task.filename}): ${data.message || 'Data kosong/Error server'}`);
+                        }
+                    } catch (err) {
+                        errorMessages.push(`${task.type} (${task.filename}): Gagal dieksekusi (${err.message})`);
+                    }
+
+                    completedTasks++;
+                    progressBar.style.width = Math.round((completedTasks / totalTasks) * 100) + '%';
+                }
 
                 loading.style.display = 'none';
                 resultSection.style.display = 'block';
-
-                let combinedData = {
-                    stats: {},
-                    results: [],
-                    success: false
-                };
-                
-                let errorMessages = [];
-
-                if (dataKtp.success) {
-                    combinedData.success = true;
-                    Object.assign(combinedData.stats, dataKtp.stats);
-                    dataKtp.results.forEach(res => {
-                        res.image = res.image + ' (KTP)';
-                        combinedData.results.push(res);
-                    });
-                } else {
-                    errorMessages.push(`KTP: ${dataKtp.message}`);
-                }
-
-                if (dataKk.success) {
-                    combinedData.success = true;
-                    Object.assign(combinedData.stats, dataKk.stats);
-                    dataKk.results.forEach(res => {
-                        res.image = res.image + ' (KK)';
-                        combinedData.results.push(res);
-                    });
-                } else {
-                    errorMessages.push(`KK: ${dataKk.message}`);
-                }
 
                 let htmlReport = '';
                 
@@ -112,7 +147,7 @@
                     });
                 }
 
-                if (combinedData.success) {
+                if (combinedData.results.length > 0) {
                     htmlReport += generateReportHTML(combinedData);
                 }
 

@@ -12,7 +12,7 @@ use thiagoalessio\TesseractOCR\TesseractOCR;
 
 // Konfigurasi
 $uploadsDir = __DIR__ . '/uploads';
-$maxFileSize = 5 * 1024 * 1024; // 5MB
+$maxFileSize = 8 * 1024 * 1024; // 8MB
 $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff'];
 
 // Buat folder uploads jika belum ada
@@ -1606,6 +1606,27 @@ function calculateCER($ocrResult, $groundTruth) {
     return min((levenshtein($ocrResult, $groundTruth) / $N) * 100, 100);
 }
 
+// Fungsi untuk cache hasil Tesseract agar tidak mengulang proses yang lama
+function getCachedOCRText($imagePath, $tempPreprocessed, $psm = 6) {
+    $hash = md5_file($imagePath);
+    $cacheDir = __DIR__ . '/uploads/ocr_cache';
+    if (!is_dir($cacheDir)) {
+        mkdir($cacheDir, 0755, true);
+    }
+    $cacheFile = $cacheDir . '/' . $hash . '_psm' . $psm . '.txt';
+    
+    if (file_exists($cacheFile)) {
+        return file_get_contents($cacheFile);
+    }
+    
+    $ocr = new TesseractOCR($tempPreprocessed);
+    $ocr->lang('ind+eng')->psm($psm)->oem(3);
+    $rawText = $ocr->run();
+    
+    file_put_contents($cacheFile, $rawText);
+    return $rawText;
+}
+
 if (isset($_GET['run_test']) && $_GET['run_test'] == '1') {
     ob_end_clean();
     header('Content-Type: application/json; charset=utf-8');
@@ -1651,9 +1672,7 @@ if (isset($_GET['run_test']) && $_GET['run_test'] == '1') {
         
         try {
             if (preprocessImage($imagePath, $tempPreprocessed)) {
-                $ocr = new TesseractOCR($tempPreprocessed);
-                $ocr->lang('ind+eng')->psm(6)->oem(3);
-                $rawText = $ocr->run();
+                $rawText = getCachedOCRText($imagePath, $tempPreprocessed, 6);
                 
                 $processedText = postProcessOCRText(trim((string)$rawText));
                 $extractedFields = extractKtpFields($processedText, $tempPreprocessed);
@@ -1739,9 +1758,7 @@ if (isset($_GET['run_test_kk']) && $_GET['run_test_kk'] == '1') {
         
         try {
             if (preprocessImage($imagePath, $tempPreprocessed)) {
-                $ocr = new TesseractOCR($tempPreprocessed);
-                $ocr->lang('ind+eng')->psm(6)->oem(3);
-                $rawText = $ocr->run();
+                $rawText = getCachedOCRText($imagePath, $tempPreprocessed, 6);
                 
                 // EKSTRAK KHUSUS NOMOR KK
                 $extractedNomorKk = extractNomorKK($rawText);

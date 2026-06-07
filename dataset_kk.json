@@ -166,5 +166,11 @@
         "ground_truth": {
             "nomor_kk": "1807122708080004"
         }
+    },
+    {
+        "image_path": "uploads/sample kk/KK_11zon.jpg",
+        "ground_truth": {
+            "nomor_kk": "3505142405061935"
+        }
     }
 ]
