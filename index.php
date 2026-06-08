@@ -12,7 +12,7 @@ use thiagoalessio\TesseractOCR\TesseractOCR;
 
 // Konfigurasi
 $uploadsDir = __DIR__ . '/uploads';
-$maxFileSize = 8 * 1024 * 1024; // 8MB
+$maxFileSize = 8 * 1024 * 1024; // 8 MB
 $allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff'];
 
 // Buat folder uploads jika belum ada
@@ -360,9 +360,12 @@ function normalizeNikCandidate($value) {
     
     // Hanya konversi karakter yang secara visual SANGAT MIRIP dengan angka tertentu
     // dan sering salah baca oleh Tesseract pada dokumen cetak:
+    $niks = str_replace(['D'], '0', $niks);         // D -> 0 (sering salah baca pada KTP)
     $niks = str_replace(['O', 'o'], '0', $niks);   // O -> 0 (sangat mirip)
-    $niks = str_replace(['l', 'I'], '1', $niks);   // l/I -> 1 (sangat mirip di font OCR-A)
-    $niks = str_replace(['B'], '8', $niks);         // B -> 8 (mirip di font sempit)
+    $niks = str_replace(['l', 'I', 'L', '!'], '1', $niks);   // l/I/L/! -> 1
+    $niks = str_replace(['S', 's'], '5', $niks);   // S -> 5
+    $niks = str_replace(['Z', 'z'], '2', $niks);   // Z -> 2
+    $niks = str_replace(['B'], '8', $niks);         // B -> 8
     
     // Remove sisa karakter non-digit
     $niks = preg_replace('/\D/', '', $niks);
@@ -910,23 +913,65 @@ function preprocessImageWithGD($inputPath, $outputPath) {
  */
 function extractNomorKK($text) {
     error_log("[KK] extractNomorKK called with text length: " . strlen($text));
-    error_log("[KK] Raw KK text (first 300): " . substr($text, 0, 300));
+    error_log("[KK] Raw KK text (first 500): " . substr($text, 0, 500));
     
-    // Clean up typical OCR noise for KK Number specifically
-    // Pattern 1: "No." / "Nomor" followed by digits (14-18 chars to be lenient)
-    if (preg_match('/(?:No|Nomor)[\.\s,:=]*([0-9OolISZB]{14,18})/i', $text, $matches)) {
-        error_log("[KK] Pattern 1 matched: " . $matches[1]);
+    // Pre-clean: Hapus karakter noise umum dari OCR KK
+    $cleanText = $text;
+    $cleanText = str_replace(['©', '®', '™', '°'], '', $cleanText);
+    
+    // Pattern 1: "No." / "Nomor" / "N0" diikuti deretan digit (OCR sering baca 'o' sebagai '0')
+    // Karakter pemisah yang lebih luas: . : = > - spasi
+    if (preg_match('/(?:No|N0|Nomor|NOMOR)[\s\.,:=>\-]*([0-9OolLISZBD]{14,20})/i', $cleanText, $matches)) {
+        error_log("[KK] Pattern 1 (No/Nomor) matched: " . $matches[1]);
         return normalizeNikCandidate($matches[1]);
     }
     
-    // Pattern 2: Look for "KK" keyword followed by digits
-    if (preg_match('/KK[\.\s,:=]*([0-9OolISZB]{14,18})/i', $text, $matches)) {
-        error_log("[KK] Pattern 2 (KK keyword) matched: " . $matches[1]);
+    // Pattern 1b: "No." diikuti spasi lalu titik lalu digit (OCR kadang baca: "No.1807...")
+    if (preg_match('/(?:No|N0|Nomor)[\s\.]*[:\-=>]?\s*\.?\s*([0-9OolLISZBD\.\-\s]{14,25})/i', $cleanText, $matches)) {
+        $candidate = preg_replace('/[\s\.\-]/', '', $matches[1]);
+        if (strlen($candidate) >= 14) {
+            error_log("[KK] Pattern 1b (No. with dots/spaces) matched: " . $candidate);
+            return normalizeNikCandidate($candidate);
+        }
+    }
+    
+    // Pattern 2: "KARTU KELUARGA" header lalu "No." di baris berikutnya
+    if (preg_match('/KARTU\s+KELUARGA[\s\S]{0,50}?(?:No|N0|Nomor)?[\s\.,:=>\-]*([0-9OolLISZBD]{14,20})/i', $cleanText, $matches)) {
+        error_log("[KK] Pattern 2 (KARTU KELUARGA header) matched: " . $matches[1]);
         return normalizeNikCandidate($matches[1]);
+    }
+    
+    // Pattern 3: Look for "KK" keyword followed by digits
+    if (preg_match('/KK[\s\.,:=>\-]*([0-9OolLISZBD]{14,20})/i', $cleanText, $matches)) {
+        error_log("[KK] Pattern 3 (KK keyword) matched: " . $matches[1]);
+        return normalizeNikCandidate($matches[1]);
+    }
+    
+    // Pattern 4: Cari sequence 16+ digit setelah baris yang mengandung "KELUARGA"
+    $lines = explode("\n", $cleanText);
+    $foundKeluargaLine = false;
+    foreach ($lines as $kkLine) {
+        $kkLine = trim($kkLine);
+        if (stripos($kkLine, 'KELUARGA') !== false) {
+            $foundKeluargaLine = true;
+            // Cari di baris yang sama
+            if (preg_match('/([0-9OolLISZBD]{14,20})/', $kkLine, $m)) {
+                error_log("[KK] Pattern 4a (same line as KELUARGA): " . $m[1]);
+                return normalizeNikCandidate($m[1]);
+            }
+            continue;
+        }
+        if ($foundKeluargaLine && preg_match('/([0-9OolLISZBD]{14,20})/', $kkLine, $m)) {
+            error_log("[KK] Pattern 4b (line after KELUARGA): " . $m[1]);
+            return normalizeNikCandidate($m[1]);
+        }
+        if ($foundKeluargaLine && !empty($kkLine)) {
+            $foundKeluargaLine = false; // Reset jika baris setelahnya bukan digit
+        }
     }
     
     // Fallback: look for 14-18 digit sequences anywhere in text
-    if (preg_match_all('/\b([0-9OolISZB]{14,18})\b/i', $text, $matches)) {
+    if (preg_match_all('/([0-9OolLISZBD]{14,20})/i', $cleanText, $matches)) {
         error_log("[KK] Fallback found " . count($matches[1]) . " candidates");
         foreach ($matches[1] as $candidate) {
             error_log("[KK] Fallback candidate: " . $candidate);
@@ -991,13 +1036,13 @@ function extractKtpFields($text, $imagePath = null) {
         if (empty($line)) continue;
         $lineLower = strtolower($line);
         
-        // NIK: hanya coba dari teks jika image crop gagal
-        if (empty($fields['nik']) && stripos($lineLower, 'nik') !== false) {
+        // NIK: Prioritaskan dari teks mentah (text parsing SELALU jalan meskipun crop berhasil)
+        if (stripos($lineLower, 'nik') !== false) {
             $nikCandidate = null;
 
             // Step A: Isolasi teks tepat SETELAH keyword NIK, buang semua prefix
             $nikPart = '';
-            if (preg_match('/NIK\s*[:\-=]?\s*([0-9OolISZBb8\s\.]{10,25})/i', $line, $preMatches)) {
+            if (preg_match('/(?:NIK|Wik|N[i1]k)\s*[©:\-=>\.\s]\s*([0-9OolLISZBbDd8!\s\.]{10,25})/i', $line, $preMatches)) {
                 $nikPart = trim($preMatches[1]);
                 error_log("[NIK] Isolated NIK part after keyword: '" . $nikPart . "'");
             }
@@ -1005,10 +1050,10 @@ function extractKtpFields($text, $imagePath = null) {
             // Step B: Bersihkan nikPart
             if (!empty($nikPart)) {
                 $nikCompact = preg_replace('/\s+/', '', $nikPart);
-                if (preg_match('/([0-9OolIBb]{14,18})/', $nikCompact, $matches)) {
+                if (preg_match('/([0-9OolLISZBbDd!]{14,18})/', $nikCompact, $matches)) {
                     $nikCandidate = $matches[1];
                     error_log("[NIK] Pattern 1 (isolated compact): '" . $nikCandidate . "'");
-                } elseif (preg_match('/([0-9OolIBb\.\-]{10,20})/', $nikPart, $matches)) {
+                } elseif (preg_match('/([0-9OolLISZBbDd!\.\-]{10,20})/', $nikPart, $matches)) {
                     $nikCandidate = $matches[1];
                     error_log("[NIK] Pattern 1b (isolated spaced): '" . $nikCandidate . "'");
                 }
@@ -1016,7 +1061,7 @@ function extractKtpFields($text, $imagePath = null) {
 
             // Step C: Fallback - cari sequence digit terpanjang di baris
             if (empty($nikCandidate)) {
-                preg_match_all('/[0-9OolIBb]{6,}/', $line, $allDigitGroups);
+                preg_match_all('/[0-9OolLISZBbDd!]{6,}/', $line, $allDigitGroups);
                 if (!empty($allDigitGroups[0])) {
                     usort($allDigitGroups[0], function($a, $b) { return strlen($b) - strlen($a); });
                     foreach ($allDigitGroups[0] as $group) {
@@ -1199,12 +1244,17 @@ function extractKtpFields($text, $imagePath = null) {
         
         // 8. Extract Alamat
         // Potong tepat sebelum RT/RW, Kelurahan, atau pipa |
-        if (preg_match('/Alamat\s*[:=]\s*(.+?)(?=\s*(?:\||RT\s*\/\s*RW|RT\/RW|RT\s*[:=>]|RW\s*[:=>]|Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.|Kecamatan|Kec\.?|$))/i', $line, $matches)) {
+        // Handle separator: ':', '=', '.', '—', '-', '>' setelah "Alamat"
+        if (preg_match('/Alamat\s*[:.=\-—>]?\s*[:=]?\s*(.+?)(?=\s*(?:\||RT\s*\/\s*RW|RT\/RW|RT\s*[:=>]|RW\s*[:=>]|Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.|Kecamatan|Kec\.?|$))/i', $line, $matches)) {
             $alamat = trim($matches[1]);
             // Potong di pipa |
             if (($pipePos = strpos($alamat, '|')) !== false) {
                 $alamat = substr($alamat, 0, $pipePos);
             }
+            // Hapus trailing noise: huruf tunggal + ':' + huruf tunggal (e.g. "y: F")
+            $alamat = preg_replace('/\s+[a-zA-Z]\s*[:=]\s*[a-zA-Z]?\s*$/', '', $alamat);
+            // Hapus trailing simbol noise (§, ~, !, dll)
+            $alamat = preg_replace('/\s*[§~!@#$%^&*()+=\[\]{}|\\<>?\/`]+\s*$/', '', $alamat);
             $alamat = preg_replace('/\s+["\']?\s*$/', '', $alamat);
             $alamat = rtrim($alamat, ' ,;:.-');
             $alamat = cleanupOCRNoise($alamat);
@@ -1220,8 +1270,8 @@ function extractKtpFields($text, $imagePath = null) {
         // - "RT: 006 / RW: 007"
         // - "006/007"
         
-        // Format 1: Combined "RT/RW: 006/007"
-        if (preg_match('/RT\s*\/\s*RW\s*[:=>]\s*(\d+)\s*\/\s*(\d+)/i', $line, $matches)) {
+        // Format 1: Combined "RT/RW: 006/007" - handle juga separator —, -, . sebelum angka
+        if (preg_match('/RT\s*\/\s*R[wW]\s*[—\-\.]*\s*[:=>]?\s*[—\-:]*\s*(\d+)\s*\/\s*(\d+)/i', $line, $matches)) {
             $rt = str_pad($matches[1], 3, '0', STR_PAD_LEFT);
             $rw = str_pad($matches[2], 3, '0', STR_PAD_LEFT);
             if (empty($fields['rt_rw'])) {
@@ -1251,8 +1301,11 @@ function extractKtpFields($text, $imagePath = null) {
         
         // 11. Extract Kelurahan/Desa
         // Handle formats: "Kelurahan", "Desa", "Kel/Desa", "Kel.", etc.
-        if (preg_match('/(?:Kelurahan|Desa|Kel\.\s*\/?\s*Desa|Kel\.)\s*[:=]\s*(.+?)(?=\s*(?:Kecamatan|Kec\.?|Kota|Kabupaten|Provinsi|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
+        // Handle separator yang beragam: ':', '=', '—:', '-:', '.', '— —:', dll
+        if (preg_match('/(?:Kelurahan|Desa|Kel(?:urahan)?\s*\/\s*Desa|Kel\.)\s*[—\-\.]*\s*[:=_]?\s*(.+?)(?=\s*(?:Kecamatan|Kec\.?|Kota|Kabupaten|Provinsi|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
             $kel = trim($matches[1]);
+            // Hapus leading noise: —, _, -, :, .
+            $kel = preg_replace('/^[—_\-:.\s]+/', '', $kel);
             $kel = rtrim($kel, ' ,;:.-');
             $kel = cleanupOCRNoise($kel);  // Remove OCR noise
             if (!empty($kel) && strlen($kel) > 2) {
@@ -1263,8 +1316,11 @@ function extractKtpFields($text, $imagePath = null) {
         }
         
         // 12. Extract Kecamatan
-        if (preg_match('/Kecamatan\s*[:=]\s*(.+?)(?=\s*(?:Kota|Kabupaten|Provinsi|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
+        // Handle separator: ':', '=', '-:', '.:', '—:', dll
+        if (preg_match('/Kecamatan\s*[—\-\.]*\s*[:=]?\s*(.+?)(?=\s*(?:Kota|Kabupaten|Provinsi|Agama|Status|Perkawinan|Pekerjaan|Kewarganegaraan|Berlaku|$))/i', $line, $matches)) {
             $kec = trim($matches[1]);
+            // Hapus leading noise
+            $kec = preg_replace('/^[—_\-:.\s]+/', '', $kec);
             $kec = rtrim($kec, ' ,;:.-');
             $kec = cleanupOCRNoise($kec);  // Remove OCR noise
             if (!empty($kec) && strlen($kec) > 2) {
@@ -1347,8 +1403,11 @@ function extractKtpFields($text, $imagePath = null) {
             $pekerjaan = ltrim($pekerjaan, '!>= ');
             // Strip trailing tanggal (dd-mm-yyyy) yang ikut terbaca dari stempel/cap
             $pekerjaan = preg_replace('/\s+\d{1,2}\s*[-\/]\s*\d{1,2}\s*[-\/]\s*\d{2,4}\s*$/', '', $pekerjaan);
-            // Strip trailing kota/kata >= 5 huruf di akhir yang tidak relevan
-            $pekerjaan = preg_replace('/\s+[A-Z]{5,}\s*$/', '', $pekerjaan);
+            // Strip trailing kota/kabupaten/provinsi: kata >= 4 huruf kapital di akhir
+            // yang bukan bagian nama pekerjaan (e.g. "PELAJAR/MAHASISWA BLITAR" -> "PELAJAR/MAHASISWA")
+            $pekerjaan = preg_replace('/\s+(?!MAHASISWA|SWASTA|WIRASWASTA|PELAJAR|PEGAWAI|NEGERI|SIPIL|BURUH|TANI|NELAYAN|GURU|KARYAWAN|DOKTER|TENTARA|POLISI|PERAWAT|PETANI|PEDAGANG)[A-Z]{4,}\s*$/i', '', $pekerjaan);
+            // Strip trailing noise: kata 1-3 huruf kecil (e.g. "Bulla", "pb")
+            $pekerjaan = preg_replace('/\s+[a-z]{1,5}\s*$/', '', $pekerjaan);
             $pekerjaan = cleanupOCRNoise($pekerjaan);
             $pekerjaan = cleanupFieldValue($pekerjaan, 'pekerjaan');
             $pekerjaan = strtoupper(trim($pekerjaan));
@@ -1513,19 +1572,38 @@ function postProcessOCRText($text) {
         }
     }
     
+    // =========================================================
+    // STEP 1.5: Pisahkan field yang menempel dalam 1 baris
+    // OCR KTP fisik sering menggabungkan field dalam satu baris (e.g. NIK... Nama...)
+    // Pisahkan dengan \n agar regex per field (seperti NIK) tidak melahap isi field lain!
+    // =========================================================
+    $splitKeywords = [
+        'NIK', 'Nama', 'Tempat\/Tgl(?:\s*Lahir)?', 'Tempat\s+Tgl\s+Lahir',
+        'Jenis\s+Kelamin', 'Gol\.?\s*Darah', 'Alamat',
+        'RT\s*\/\s*RW', 'RT\s*\/\s*R[wW]',
+        'Kel(?:urahan)?(?:\s*\/\s*Desa)?', 'Kecamatan',
+        'Agama', 'Status\s+Perkawinan', 'Pekerjaan',
+        'Kewarganegaraan', 'Berlaku\s*Hingga'
+    ];
+    // Ganti spasi atau karakter pemisah (|,-) sebelum keyword dengan newline
+    // Ganti spasi atau karakter pemisah (|,—,-,;) sebelum keyword KTP dengan newline
+    // Juga handle separator yang lebih luas: ':', '=', '.', '—', '>' setelah keyword
+    $splitPattern = '/(?:\s+|[|—\-,;]\s*)(?=' . implode('|', $splitKeywords) . '\s*[:.=—\->])/i';
+    $processedText = preg_replace($splitPattern, "\n", $processedText);
+
     // 2. Context-aware fixes based on known patterns
-    // Fix NIK (Nomor Induk Kependudukan) format - harus 16 digit
+    // Fix NIK (Nomor Induk Kependudukan) format - cegah melahap teks huruf jika masih sebaris
     $nikFixedText = preg_replace_callback(
-        '/NIK\s*[:=\s]+([^|\n\r]*)/',
+        '/NIK\s*[©®°:.=>\-\s]+([0-9OolLISZBDd! \t\.\-]+)/i',
         function($matches) {
             $niks = trim($matches[1]);
             // Clean up common OCR errors in NIK
-            $niks = preg_replace('/[O]/i', '0', $niks); // O -> 0
-            $niks = preg_replace('/[l]/i', '1', $niks);  // l -> 1
+            $niks = preg_replace('/[Dd]/', '0', $niks);  // D/d -> 0
+            $niks = preg_replace('/[Oo]/', '0', $niks);  // O/o -> 0
+            $niks = preg_replace('/[lL!I]/', '1', $niks); // l/L/!/I -> 1
             $niks = preg_replace('/[S]/i', '5', $niks);  // S -> 5
             $niks = preg_replace('/[Z]/i', '2', $niks);  // Z -> 2
             $niks = preg_replace('/[B]/i', '8', $niks);  // B -> 8
-            $niks = preg_replace('/[I|!]/', '1', $niks);  // I/|/! -> 1
             $niks = preg_replace('/[^0-9]/', '', $niks); // Remove non-digits
             return 'NIK : ' . $niks;
         },
@@ -2225,7 +2303,7 @@ ob_end_clean();
                             </div>
                             <div class="upload-text">
                                 <h3>Upload Gambar KK</h3>
-                                <p>Supported: JPG, PNG, dll (Max 5MB)</p>
+                                <p>Supported: JPG, PNG, dll (Max 8MB)</p>
                             </div>
                         </div>
                         <input type="file" id="imageInputKk" name="image_kk" accept="image/*" required style="display: none;">
