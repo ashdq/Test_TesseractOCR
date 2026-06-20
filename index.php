@@ -343,10 +343,6 @@ function cleanupTempatTglLahir($text) {
 }
 
 /**
- * Normalisasi kandidat NIK dari OCR dengan agresif menonormalisir karakter yang sering salah baca.
- * Focus on digits 0-9, handle common OCR confusions.
- */
-/**
  * Normalisasi kandidat NIK dari OCR.
  * Hanya konversi karakter yang secara visual SANGAT mirip angka.
  * Jangan konversi terlalu agresif karena bisa merusak angka yang sudah benar.
