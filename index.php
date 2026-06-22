@@ -1073,6 +1073,11 @@ function extractKtpFields($text, $imagePath = null) {
             if (!empty($nikCandidate)) {
                 $nikNormalized = normalizeNikCandidate($nikCandidate);
                 if ($nikNormalized !== null && $nikNormalized[0] !== '0') {
+                    // Validasi tambahan: jika panjang > 16, coba trim dari kiri
+                    // untuk kasus OCR membaca karakter I/l dari keyword "NIK" ikut masuk
+                    if (strlen($nikNormalized) > 16) {
+                        $nikNormalized = substr($nikNormalized, strlen($nikNormalized) - 16);
+                    }
                     $fields['nik'] = $nikNormalized;
                     error_log("[NIK] Text parsing SUCCESS: " . $nikNormalized);
                 }
@@ -1083,7 +1088,9 @@ function extractKtpFields($text, $imagePath = null) {
         
         // 2. Extract Nama (text setelah "Nama")
         // PENTING: Potong jika muncul keyword field lain (Tempat, Tgl, Lahir, dll)
-        if (preg_match('/Nama\s*[:=]\s*([^|\n\r]+)/i', $line, $matches)) {
+        // Perluas pola agar bisa menangkap: "Nama __:", "Nama  :", "Nama_:" dll
+        // OCR sering menambahkan karakter noise (_, spasi, -) antara kata Nama dan separator :
+        if (preg_match('/Nama\s*[_\-\s]*[:=]\s*([^|\n\r]+)/i', $line, $matches)) {
             $nama = trim($matches[1]);
             
             // Potong TEPAT sebelum keyword field berikutnya yang mungkin ikut terbaca di baris sama
@@ -1590,17 +1597,19 @@ function postProcessOCRText($text) {
     // 2. Context-aware fixes based on known patterns
     // Fix NIK (Nomor Induk Kependudukan) format - cegah melahap teks huruf jika masih sebaris
     $nikFixedText = preg_replace_callback(
-        '/NIK\s*[©®°:.=>\-\s]+([0-9OolLISZBDd! \t\.\-]+)/i',
+        '/NIK\s*[©®°:.=>\-\s]*([0-9OolLISZBDd!?\s\.\-]{10,30})/i',
         function($matches) {
             $niks = trim($matches[1]);
             // Clean up common OCR errors in NIK
-            $niks = preg_replace('/[Dd]/', '0', $niks);  // D/d -> 0
-            $niks = preg_replace('/[Oo]/', '0', $niks);  // O/o -> 0
-            $niks = preg_replace('/[lL!I]/', '1', $niks); // l/L/!/I -> 1
-            $niks = preg_replace('/[S]/i', '5', $niks);  // S -> 5
-            $niks = preg_replace('/[Z]/i', '2', $niks);  // Z -> 2
-            $niks = preg_replace('/[B]/i', '8', $niks);  // B -> 8
-            $niks = preg_replace('/[^0-9]/', '', $niks); // Remove non-digits
+            // Pertama hapus karakter noise yang tidak relevan (?, !, *, dll)
+            $niks = preg_replace('/[?!*~`]/', '', $niks);  // Hapus noise chars
+            $niks = preg_replace('/[Dd]/', '0', $niks);    // D/d -> 0
+            $niks = preg_replace('/[Oo]/', '0', $niks);    // O/o -> 0
+            $niks = preg_replace('/[lL!I]/', '1', $niks);  // l/L/!/I -> 1
+            $niks = preg_replace('/[S]/i', '5', $niks);    // S -> 5
+            $niks = preg_replace('/[Z]/i', '2', $niks);    // Z -> 2
+            $niks = preg_replace('/[B]/i', '8', $niks);    // B -> 8
+            $niks = preg_replace('/[^0-9]/', '', $niks);   // Remove non-digits
             return 'NIK : ' . $niks;
         },
         $processedText

@@ -348,5 +348,12 @@
             "nik": "3505142311030001",
             "nama": "FATRIYA IBNU ASH SHIDIQQI"
         }
+    },
+    {
+        "image_path": "uploads/KTP_pak is.png",
+        "ground_truth": {
+            "nik": "3578162503680001",
+            "nama": "SUMARDIANSYAH"
+        }
     }
 ]
